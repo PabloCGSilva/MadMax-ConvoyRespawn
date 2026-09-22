@@ -8,80 +8,14 @@
 #include "mm/game/go/vehicle.h"
 #include "mm/game/cameramanager.h"
 #include "mm/core/input.h"
-
-// ---- Game version gate (public beta, 2026-09-21) ----
-// Every address in this file is absolute and was verified against exactly
-// one binary: AVAMain.exe, non-Steam build, PE TimeDateStamp 0x566520B2
-// (2015-12-07), SizeOfImage 0x01AA8000, no ASLR (DYNAMIC_BASE off, so it
-// always loads at 0x140000000). On any other executable those addresses are
-// garbage and hooking them would crash someone else's game. So before
-// touching anything -- including the SDK's own HookMgr::Initialize(), which
-// reads a magic value at a fixed address -- the main module's PE header and
-// 24 bytes of code at every function this mod calls or hooks are compared
-// against what that binary contains. Any mismatch: the plugin stays loaded
-// but completely inert, tells the user why, and returns.
-static bool g_gameVersionOk = false;
-static char g_gameVersionStatus[160] = "not checked";
-
-struct CodeSignature { const char* name; uintptr_t addr; unsigned char bytes[24]; };
-static const CodeSignature g_signatures[] = {
-    { "NGSONodes::ConvoyDataSetWrecked", 0x1402BDB20ull, { 0x40, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x5C, 0x24, 0x50, 0x48, 0x89, 0x6C, 0x24 } },
-    { "GetGameObjectTyped<CConvoyDataContainer>", 0x1402BC8B0ull, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x30, 0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF, 0xFF, 0xE8, 0x4C, 0x38, 0xFE, 0xFF, 0x48, 0x8B, 0xD8, 0x48 } },
-    { "CGameObject::FindOptional", 0x1406B8900ull, { 0x48, 0x8B, 0xC4, 0x57, 0x48, 0x83, 0xEC, 0x70, 0x48, 0xC7, 0x44, 0x24, 0x48, 0xFE, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x58, 0x08, 0x48, 0x89, 0x70 } },
-    { "CGameObject::AddToUpdate", 0x14068E290ull, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x01, 0x80, 0xA1, 0x8C, 0x00, 0x00, 0x00 } },
-    { "CGraphScriptGameObject::UpdatePostSim", 0x1402AEF60ull, { 0x40, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x5C, 0x24, 0x58, 0x48, 0x89, 0x74, 0x24 } },
-    { "CPlayer::UpdateController", 0x1404C6670ull, { 0x48, 0x8B, 0xC4, 0x41, 0x54, 0x48, 0x81, 0xEC, 0x90, 0x00, 0x00, 0x00, 0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x58 } },
-};
-
-static bool VerifyGameVersion() {
-    HMODULE exe = GetModuleHandleA(NULL);
-    if ((uintptr_t)exe != 0x140000000ull) {
-        snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "executable not loaded at 0x140000000 (got %p)", (void*)exe);
-        return false;
-    }
-    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)exe;
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) { snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "no DOS header"); return false; }
-    const IMAGE_NT_HEADERS64* nt = (const IMAGE_NT_HEADERS64*)((uintptr_t)exe + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) { snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "no PE header"); return false; }
-    if (nt->FileHeader.TimeDateStamp != 0x566520B2u || nt->OptionalHeader.SizeOfImage != 0x01AA8000u) {
-        snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "different AVAMain.exe build (timestamp 0x%08X, image size 0x%08X; expected 0x566520B2 / 0x01AA8000)",
-            (unsigned)nt->FileHeader.TimeDateStamp, (unsigned)nt->OptionalHeader.SizeOfImage);
-        return false;
-    }
-    for (const CodeSignature& sig : g_signatures) {
-        if (memcmp((const void*)sig.addr, sig.bytes, sizeof(sig.bytes)) != 0) {
-            snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "code mismatch at %s", sig.name);
-            return false;
-        }
-    }
-    // The variable-pin hash immediate inside ConvoyDataSetWrecked (mov r8d, 0xBAFB74B7).
-    if (*(const unsigned int*)(0x1402BDB56ull) != 0xBAFB74B7u) {
-        snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "code mismatch at ConvoyDataSetWrecked pin hash");
-        return false;
-    }
-    snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "OK (AVAMain.exe build 2015-12-07, non-Steam)");
-    return true;
-}
-
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
-{
-    if (dwReason == DLL_PROCESS_ATTACH) {
-        g_gameVersionOk = VerifyGameVersion();
-        if (!g_gameVersionOk) {
-            char msg[512];
-            snprintf(msg, sizeof(msg),
-                "Mad Max Convoy Respawn Mod is DISABLED: this game executable is not the build it was made for.\n\n"
-                "Reason: %s\n\n"
-                "The mod stays loaded but does nothing, so the game is safe to play. "
-                "Please report your game version (store + patch) to the mod author.", g_gameVersionStatus);
-            MessageBoxA(NULL, msg, "Mad Max Convoy Respawn Mod", MB_OK | MB_ICONWARNING);
-            return TRUE;
-        }
-        HookMgr::Initialize();
-        PluginAttach(hModule, dwReason, lpReserved);
-    }
-    return TRUE;
-}
+// DbgHelp.h defines its own ADDRESS macro, which would clobber the SDK's
+// ADDRESS(gog, steam); keep ours.
+#pragma push_macro("ADDRESS")
+#undef ADDRESS
+#include <DbgHelp.h>
+#undef ADDRESS
+#pragma pop_macro("ADDRESS")
+#pragma comment(lib, "dbghelp.lib")
 
 // ---- Build mode (2026-09-17) ----
 // This file doubles as (a) the distributable "Convoy Respawn Mod" -- the
@@ -97,7 +31,200 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 // User-requested (2026-09-18): always show a visible tag for whatever
 // build is currently installed, so it's never ambiguous which test is
 // running. Bump this string every time a new test build goes out.
-#define MM_BUILD_TAG "v0.9.0-beta1 (2026-09-21)"
+#define MM_BUILD_TAG "v0.9.1-beta2c (2026-09-22)"
+
+// ---- Session event log (2026-09-21) ----
+// Replaces screenshot-driven debugging: every notable event (wreck seen,
+// respawn armed/fired, composition patch, crash) is appended with a
+// timestamp to scripts\convoy_respawn_log.txt, plus a snapshot of all 14
+// convoys every 60 s and at game exit (DLL_PROCESS_DETACH). Append+close per
+// line so the file survives a crash. Truncated at each game start.
+static DWORD g_logSessionStart = 0;
+static char g_modDir[MAX_PATH] = "";   // folder of this .asi; set in DllMain (the CWD at attach time is not the game folder)
+static char g_logPath[MAX_PATH] = "convoy_respawn_log.txt";
+static char g_crashPath[MAX_PATH] = "convoy_crash_stack.txt";
+static char g_dumpPath[MAX_PATH] = "convoy_composition_dump.txt";
+static void InitModPaths(HMODULE self) {
+    if (GetModuleFileNameA(self, g_modDir, MAX_PATH)) {
+        char* slash = strrchr(g_modDir, '\\');
+        if (slash) slash[1] = 0;
+        snprintf(g_logPath, MAX_PATH, "%sconvoy_respawn_log.txt", g_modDir);
+        snprintf(g_crashPath, MAX_PATH, "%sconvoy_crash_stack.txt", g_modDir);
+        snprintf(g_dumpPath, MAX_PATH, "%sconvoy_composition_dump.txt", g_modDir);
+    }
+}
+static void LogLine(const char* fmt, ...) {
+    FILE* f = nullptr;
+    if (fopen_s(&f, g_logPath, "a") != 0 || !f) return;
+    SYSTEMTIME st; GetLocalTime(&st);
+    DWORD t = GetTickCount() - g_logSessionStart;
+    fprintf(f, "[%02d:%02d:%02d +%5lu.%01lus] ", st.wHour, st.wMinute, st.wSecond, (unsigned long)(t / 1000), (unsigned long)((t % 1000) / 100));
+    va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+static void LogSessionStart() {
+    g_logSessionStart = GetTickCount();
+    FILE* f = nullptr;
+    if (fopen_s(&f, g_logPath, "w") == 0 && f) fclose(f);
+}
+
+// ---- Game address resolution by byte signature (v0.9.1, 2026-09-21) ----
+// beta1 hard-coded every address and refused any executable but the GOG
+// 2015-12-07 build. Steam users reported that immediately. The Steam exe is
+// a different build (the SDK's own GOG/Steam address pairs differ by
+// non-constant deltas), so instead of fixed addresses every function this
+// mod hooks or calls is now located at startup by scanning the loaded
+// executable's .text section for a byte pattern taken from the GOG build
+// (relative operands wildcarded; each pattern verified to match exactly
+// once there, see gen_sigs.py). A pattern that matches zero or several
+// times fails the check. All required patterns resolved -> the mod runs;
+// otherwise it stays loaded but inert and tells the user what failed.
+//
+// Untested on Steam at the time of writing: the code bytes are expected to
+// match (same compiler, same 1.0.3 source), and the struct offsets used
+// elsewhere in this file (CGraphScriptGameObject +0xE0/+0xF0/+0xF8,
+// CConvoyDataContainer +0xD8/+0x118, CProcessor +0xA0, CGameObject vtable
+// slot 0x138) are assumed identical between builds.
+static bool g_gameVersionOk = false;
+static void LogConvoySnapshot(const char* why);
+static void DetectConvoyMapPoints();
+extern int g_convoyMapPoints;
+extern char g_convoyMapStatus[128];
+static char g_gameVersionStatus[240] = "not checked";
+
+struct GameSignature {
+    const char* name;
+    const char* pattern;    // "48 8B ?? ..." -- '??' is a wildcard byte
+    bool required;          // release-critical; optional ones only gate dev features
+    uintptr_t resolved;
+    int matches;
+};
+static GameSignature g_sigs[] = {
+    { "NGSONodes::ConvoyDataSetWrecked",       "40 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 50 48 89 6C 24 58 48 89 74 24 60 48 8B FA 48 8B F1 E8 ?? ?? ?? ?? 48 8B E8", true, 0, 0 },
+    { "CGameObject::FindOptional",             "48 8B C4 57 48 83 EC 70 48 C7 44 24 48 FE FF FF FF 48 89 58 08 48 89 70 10", true, 0, 0 },
+    { "CPlayer::UpdateController",             "48 8B C4 41 54 48 81 EC 90 00 00 00 48 C7 44 24 20 FE FF FF FF 48 89 58 08 48 89 68 10 48 89 70 18 48 89 78 20 0F 29 70 E8 0F 28 F1 48 8B E9 F3 0F 10 81 00 03 00 00", true, 0, 0 },
+    { "CGameObject::AddToUpdate",              "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B 01 80 A1 8C 00 00 00 FE", true, 0, 0 },
+    { "CGraphScriptGameObject::UpdatePostSim", "40 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 58 48 89 74 24 60 48 8B F2 48 8B D9 48 81 C1 C0 00 00 00", true, 0, 0 },
+    { "CAIConstantsProfilesManager::ResolveConvoysCompositionCritical", "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B 49 60 49 8B F0 8B FA", false, 0, 0 },
+    { "composition table accessor",            "0F B7 01 4C 8D 04 80 48 8B 41 08 48 8B 40 58 4A 8B 04 C0 48 89 02 33 C0", false, 0, 0 },
+    { "AI constants manager singleton (mov rcx,[rip] in IterateGuards)", "48 8B 0D ?? ?? ?? ?? 4C 8D 44 24 20 8B D3 48 89 6C 24 20 E8", false, 0, 0 },
+    { "NGSONodes::SpawnStorm",                 "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D 68 C8 48 81 EC 10 01 00 00 48 C7 45 D8 FE FF FF FF", false, 0, 0 },
+};
+enum { SIG_SETWRECKED = 0, SIG_FINDOPTIONAL, SIG_UPDATECONTROLLER, SIG_ADDTOUPDATE, SIG_UPDATEPOSTSIM,
+       SIG_RESOLVECOMPOSITION, SIG_TABLEACCESSOR, SIG_MANAGERPTR, SIG_SPAWNSTORM, SIG_COUNT };
+
+static uintptr_t g_exeBase = 0;
+static uintptr_t g_textStart = 0, g_textEnd = 0;
+static unsigned int g_exeTimeStamp = 0, g_exeImageSize = 0;
+
+static bool ScanPattern(GameSignature& sig) {
+    unsigned char bytes[128]; bool wild[128]; int len = 0;
+    for (const char* c = sig.pattern; *c && len < 128; ) {
+        while (*c == ' ') c++;
+        if (!*c) break;
+        if (c[0] == '?') { wild[len] = true; bytes[len] = 0; len++; c += 2; continue; }
+        unsigned int v = 0; sscanf_s(c, "%2x", &v); bytes[len] = (unsigned char)v; wild[len] = false; len++; c += 2;
+    }
+    sig.matches = 0; sig.resolved = 0;
+    const unsigned char* p = (const unsigned char*)g_textStart;
+    const unsigned char* end = (const unsigned char*)g_textEnd - len;
+    for (; p <= end; p++) {
+        if (p[0] != bytes[0] && !wild[0]) continue;
+        int i = 1;
+        for (; i < len; i++) if (!wild[i] && p[i] != bytes[i]) break;
+        if (i == len) {
+            sig.matches++;
+            if (sig.matches == 1) sig.resolved = (uintptr_t)p;
+            if (sig.matches > 1) break;
+        }
+    }
+    return sig.matches == 1;
+}
+
+static bool ResolveGameAddresses() {
+    HMODULE exe = GetModuleHandleA(NULL);
+    g_exeBase = (uintptr_t)exe;
+    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)exe;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) { snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "no DOS header"); return false; }
+    const IMAGE_NT_HEADERS64* nt = (const IMAGE_NT_HEADERS64*)(g_exeBase + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) { snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "no PE header"); return false; }
+    g_exeTimeStamp = nt->FileHeader.TimeDateStamp;
+    g_exeImageSize = nt->OptionalHeader.SizeOfImage;
+    // The SDK's own store detection (ACT_EXE) reads a fixed address and its
+    // Steam hooks assume the usual base; both known builds satisfy this.
+    if (g_exeBase != 0x140000000ull || g_exeImageSize < 0x01AA8000u) {
+        snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "unexpected module layout (base %p, image size 0x%08X)", (void*)g_exeBase, g_exeImageSize);
+        return false;
+    }
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
+        if (memcmp(sec->Name, ".text", 5) == 0) {
+            g_textStart = g_exeBase + sec->VirtualAddress;
+            g_textEnd = g_textStart + sec->Misc.VirtualSize;
+            break;
+        }
+    }
+    if (!g_textStart) { snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "no .text section"); return false; }
+
+    int failedRequired = 0; char failList[160] = "";
+    for (int i = 0; i < SIG_COUNT; i++) {
+        bool ok = ScanPattern(g_sigs[i]);
+        if (!ok && g_sigs[i].required) {
+            failedRequired++;
+            size_t l = strlen(failList);
+            snprintf(failList + l, sizeof(failList) - l, "%s%s(x%d)", l ? ", " : "", g_sigs[i].name, g_sigs[i].matches);
+        }
+    }
+    // the singleton pattern points at `mov rcx,[rip+disp32]`: target = next instruction + disp32
+    if (g_sigs[SIG_MANAGERPTR].matches == 1) {
+        uintptr_t insn = g_sigs[SIG_MANAGERPTR].resolved;
+        int disp = *(const int*)(insn + 3);
+        g_sigs[SIG_MANAGERPTR].resolved = insn + 7 + (intptr_t)disp;
+    }
+    if (failedRequired) {
+        snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "signature not found: %s (exe timestamp 0x%08X)", failList, g_exeTimeStamp);
+        return false;
+    }
+    snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "OK, %d/%d signatures resolved (exe timestamp 0x%08X, %s)",
+        SIG_COUNT - (int)(!g_sigs[SIG_RESOLVECOMPOSITION].matches) - (int)(g_sigs[SIG_TABLEACCESSOR].matches != 1) - (int)(g_sigs[SIG_MANAGERPTR].matches != 1) - (int)(g_sigs[SIG_SPAWNSTORM].matches != 1),
+        SIG_COUNT, g_exeTimeStamp, g_exeTimeStamp == 0x566520B2u ? "the GOG build this was made on" : "a build not seen by the author -- please report");
+    return true;
+}
+
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
+{
+    if (dwReason == DLL_PROCESS_DETACH) {
+        LogConvoySnapshot("game exit");
+        LogLine("session end");
+        return TRUE;
+    }
+    if (dwReason == DLL_PROCESS_ATTACH) {
+        InitModPaths(hModule);
+        LogSessionStart();
+        DetectConvoyMapPoints();
+        g_gameVersionOk = ResolveGameAddresses();
+        LogLine("session start, build %s", MM_BUILD_TAG);
+        LogLine("game version check: %s", g_gameVersionStatus);
+        LogLine("convoy formation map: %s", g_convoyMapStatus);
+        for (int i = 0; i < SIG_COUNT; i++)
+            LogLine("  signature %-70s %s %p (matches %d)", g_sigs[i].name, g_sigs[i].matches == 1 ? "OK" : "--", (void*)g_sigs[i].resolved, g_sigs[i].matches);
+        if (!g_gameVersionOk) {
+            char msg[512];
+            snprintf(msg, sizeof(msg),
+                "Mad Max - Enhanced Convoys is DISABLED: it could not locate the game functions it needs in this executable.\n\n"
+                "Reason: %s\n\n"
+                "The mod stays loaded but does nothing, so the game is safe to play. "
+                "Please report your game version (store + patch) to the mod author.", g_gameVersionStatus);
+            MessageBoxA(NULL, msg, "Mad Max - Enhanced Convoys", MB_OK | MB_ICONWARNING);
+            return TRUE;
+        }
+        HookMgr::Initialize();
+        PluginAttach(hModule, dwReason, lpReserved);
+    }
+    return TRUE;
+}
+
 
 void PluginAttach(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 {
@@ -127,7 +254,8 @@ const char* g_convoySetWreckedHookInstallStatus = "not attempted yet";
 // resolves which CConvoyDataContainer instance the node is operating on. Not
 // hooked, just called directly (it's the game's own helper, address only).
 typedef void* (*GetConvoyContainerFn)(void* processor, const void* node, unsigned int pinIndex);
-static GetConvoyContainerFn GetConvoyContainer = (GetConvoyContainerFn)0x1402BC8B0;
+// (address no longer resolved: the typed resolver is a template instantiated for several types with
+// byte-identical code, so it has no unique signature; the diagnostic that used it was dropped in v0.9.1)
 
 // NGSONodes::ConvoyDataSetWrecked -- history of this hook:
 // v1 (2026-09-15): unconditionally skipped the real call (no-op). Did stop
@@ -206,6 +334,7 @@ unsigned int g_lastConvoySetWreckedRealPin = 0xFFFFFFFF;
 
 DEFHOOK(uint32_t, ConvoyDataSetWrecked, (void* processor, const void* node, unsigned int pin)) {
     g_convoySetWreckedCalls++;
+    LogLine("EVENT ConvoyDataSetWrecked called (#%d) -- a convoy was just destroyed", g_convoySetWreckedCalls);
     g_lastConvoySetWreckedRealPin = pin;
     uint32_t result = ConvoyDataSetWrecked_orig(processor, node, pin);
 
@@ -218,10 +347,7 @@ DEFHOOK(uint32_t, ConvoyDataSetWrecked, (void* processor, const void* node, unsi
     // vanilla wreck handling. The respawn is now driven by the state-4 sweep
     // in ConvoyRespawnTick() below; this resolve is kept purely as a
     // diagnostic that the pin-hash resolution keeps working.
-    {
-        void* container = GetConvoyContainer(processor, node, CONVOY_NODE_CONTAINER_PIN_HASH);
-        if (container) g_convoySetWreckedCleared++; else g_convoySetWreckedResolveFailed++;
-    }
+
 
     // Diagnostic capture of the owning graph object (shown in the overlay),
     // gated strictly on the path-hash matching -- never trust the pointer
@@ -267,7 +393,7 @@ DEFHOOK(uint32_t, ConvoyDataSetWrecked, (void* processor, const void* node, unsi
 // so a wrong/stale ID is far more likely to be skipped than to corrupt an
 // unrelated live object.
 typedef bool (*FindOptionalFn)(uint64_t id, void* outSharedPtr /* 16 bytes */);
-static FindOptionalFn CGameObject_FindOptional = (FindOptionalFn)0x1406B8900;
+static FindOptionalFn CGameObject_FindOptional = nullptr; // set from g_sigs[SIG_FINDOPTIONAL] in PluginHooks
 
 // The per-ID names originally attached here (e.g. "gutgash_convoy3",
 // "mm3030_convoy") were retracted 2026-09-18: they came from matching each
@@ -313,6 +439,71 @@ int g_resetConvoysLastCleared = -1;
 int g_resetConvoysLastSkippedSanity = -1;
 
 #if MM_DEV_TOOLS
+
+// ---- Spawn-flow logging (2026-09-21, dev only) ----
+// "Invisible convoy" reports (dust cloud, no cars) with the +2 escorts. The
+// navigation graph already routes spawn failures into metric nodes
+// (ConvoyMetricIsSpawnPossibleFailed / InProgressSpawningFailed) and gates
+// the batch on SpawnMultipleEntitiesAvailable / SpawnHoldAfterResourcesLoaded.
+// These hooks wrap those node handlers plus RequestSpawn and, through a hook
+// on CProcessor::FireConnections, log WHICH output pin each one fired
+// (RequestSpawn: 1747528269 = "requested"; Available/Hold: true/false pins).
+// Loop nodes are logged only on pin transitions to keep the log readable.
+// Read-only: every hook just calls the original.
+static const char* g_logNodeName = nullptr;
+static unsigned int g_lastPinByNode[4] = { 0, 0, 0, 0 };
+static int g_pinRepeatByNode[4] = { 0, 0, 0, 0 };
+static bool g_convoyCompositionKnown = false;
+static int g_logNodeIndex = -1;
+
+DEFHOOK(void, FireConnectionsLog, (void* processor, const void* node, unsigned int pin)) {
+    if (g_logNodeName) {
+        if (g_logNodeIndex >= 0) {
+            if (g_lastPinByNode[g_logNodeIndex] == pin) { g_pinRepeatByNode[g_logNodeIndex]++; }
+            else {
+                if (g_pinRepeatByNode[g_logNodeIndex]) LogLine("    (%s -> pin %u repeated %d more times)", g_logNodeName, g_lastPinByNode[g_logNodeIndex], g_pinRepeatByNode[g_logNodeIndex]);
+                LogLine("  %s -> pin %u", g_logNodeName, pin);
+                g_lastPinByNode[g_logNodeIndex] = pin; g_pinRepeatByNode[g_logNodeIndex] = 0;
+            }
+        } else {
+            LogLine("  %s -> pin %u", g_logNodeName, pin);
+        }
+    }
+    FireConnectionsLog_orig(processor, node, pin);
+}
+
+// Only graphs owned by a convoy choreographer object are logged: processor+0xA0
+// is the owning CGraphScriptGameObject even for ExternalGraph sub-processors
+// (BuildSubProcessor copies it), and +0xF8 is its graph path hash.
+static bool IsConvoyProcessor(void* processor) {
+    void* obj = *(void**)((uintptr_t)processor + 0xA0);
+    return obj && *(unsigned int*)((uintptr_t)obj + 0xF8) == CONVOY_CHOREOGRAPHER_PATH_HASH;
+}
+#define LOGGED_NODE_HOOK(NAME, LABEL, IDX) \
+    DEFHOOK(uint32_t, NAME, (void* processor, const void* node, unsigned int pin)) { \
+        if (!IsConvoyProcessor(processor)) return NAME##_orig(processor, node, pin); \
+        const char* prev = g_logNodeName; int prevIdx = g_logNodeIndex; \
+        g_logNodeName = LABEL; g_logNodeIndex = IDX; \
+        uint32_t r = NAME##_orig(processor, node, pin); \
+        g_logNodeName = prev; g_logNodeIndex = prevIdx; \
+        return r; \
+    }
+LOGGED_NODE_HOOK(RequestSpawnLog, "RequestSpawn (1747528269=requested, 3838669375=not possible)", -1)
+LOGGED_NODE_HOOK(IterateGuardsLog, "ConvoysCompositionIterateGuards (172537D0=finished, ACF45D32=guard)", -1)
+LOGGED_NODE_HOOK(CCMapIsBlockedLog, "ConvoyDataCCMapIsBlocked (706834940=blocked, 3855993015=free)", -1)
+
+LOGGED_NODE_HOOK(SpawnPossibleFailedLog, "ConvoyMetricIsSpawnPossibleFailed", -1)
+LOGGED_NODE_HOOK(SpawningFailedLog, "ConvoyMetricInProgressSpawningFailed (batch resource load FAILED -> despawn + retry)", -1)
+LOGGED_NODE_HOOK(SpawnAvailableLog, "SpawnMultipleEntitiesAvailable (706834940=true, 3855993015=false)", 0)
+LOGGED_NODE_HOOK(SpawnHoldLog, "SpawnHoldAfterResourcesLoaded", 1)
+LOGGED_NODE_HOOK(SpawnResourcesLoadedLog, "SpawnResourcesLoaded (706834940=loaded, 3855993015=loading, 3714460898=FAILED)", 3)
+
+static void InstallLoggedNodeHook(uintptr_t addr, LPVOID hook, LPVOID* orig, const char* label) {
+    MH_STATUS c = MH_CreateHook((LPVOID)addr, hook, orig);
+    MH_STATUS e = (c == MH_OK) ? MH_EnableHook((LPVOID)addr) : c;
+    LogLine("spawn-flow hook %s @ %p: %s", label, (void*)addr, MH_StatusToString(e));
+}
+
 // ---- Mod A test hook (2026-09-17): NGSONodes::SpawnStorm ----
 // Found by cross-referencing a third-party Cheat Engine table
 // (MadMax_v1.03_AOB_steam_and_GoG_v1.5.CT) against our own AVAMain_F.pdb:
@@ -480,6 +671,367 @@ void ResetAllKnownConvoys() {
 
 static CVector3f g_PlayerPos(0.f, 0.f, 0.f);
 
+// ---- Convoy composition: resolver plumbing (release, 2026-09-22) ----
+// Addresses come from the signature table; see the composition patch below.
+typedef bool (*ResolveConvoysCompositionFn)(void* thiz, unsigned int id, void** outProfile);
+typedef int (*ResourceTableAccessorFn)(void* handle, void** outArray);
+static ResourceTableAccessorFn CompositionTableAccessor = nullptr; // from g_sigs[SIG_TABLEACCESSOR]
+static void** g_aiConstantsManagerPtr = nullptr;                   // from g_sigs[SIG_MANAGERPTR]
+
+int g_compositionResolveCalls = 0;
+unsigned int g_compositionLastId = 0;
+bool g_compositionLastOk = false;
+int g_compositionLastGuardEntries = -1;
+const char* g_compositionResolveHookInstallStatus = "not attempted yet";
+bool g_compositionDumpDone = false;
+char g_compositionDumpStatus[160] = "not dumped yet";
+bool f10Pressed = false;
+#if MM_DEV_TOOLS
+// ---- Convoy composition profile dump (2026-09-21, read-only) ----
+// Goal: see the real convoy compositions ("add more cars" request).
+// NGSONodes::ConvoysCompositionIterateGuards (0x1402C3B30, disassembled)
+// calls CAIConstantsProfilesManager::ResolveConvoysCompositionCritical
+// (0x1400491A0) with the convoy's ConvoyCompositionId and iterates the
+// resolved SAIProfile's m_KeyValuesHash entries -- one RequestSpawn per
+// entry (minus the one whose key matches the leader). So the escort count
+// is literally that array's m_Count. Resolve() looks the id up in a table
+// of SAIProfile (stride 0x38) reached through manager+0x60 -> a tiny pure
+// accessor (0x140A003B0: out = handle->owner->table[handle->index]) ->
+// { SAIProfile* data; uint count }. The manager singleton pointer lives at
+// 0x141711AF8 (rip-relative operand in IterateGuards).
+//
+// This build only READS: a hook on Resolve counts calls and remembers the
+// last id/profile, and DumpCompositionProfiles() walks the whole table and
+// writes every profile (id, float/hash/string key-values) to a text file
+// next to the game. Runs automatically once, right after the first
+// successful Resolve (the table is guaranteed loaded then), and on F10.
+// Layouts (Dia2Dump): SAIProfile { u64 m_ID; {SKeyValueFloat* p; u32 n} @+0x08;
+// {SKeyValueHash* p; u32 n} @+0x18; {SKeyValueString* p; u32 n} @+0x28 };
+// SKeyValueHash { u64 m_Key; u64 m_Value }; SKeyValueFloat { u64 m_Key;
+// float m_Value }; SKeyValueString { u64 m_Key; const char* m_Value }.
+void DumpCompositionProfiles() {
+    if (!g_aiConstantsManagerPtr || !CompositionTableAccessor) { snprintf(g_compositionDumpStatus, sizeof(g_compositionDumpStatus), "composition signatures not resolved on this exe"); return; }
+    void* manager = *g_aiConstantsManagerPtr;
+    if (!manager) { snprintf(g_compositionDumpStatus, sizeof(g_compositionDumpStatus), "manager singleton is null"); return; }
+    void* handle = *(void**)((uintptr_t)manager + 0x60);
+    if (!handle) { snprintf(g_compositionDumpStatus, sizeof(g_compositionDumpStatus), "composition resource handle (manager+0x60) is null"); return; }
+    void* arr = nullptr;
+    CompositionTableAccessor(handle, &arr);
+    if (!arr) { snprintf(g_compositionDumpStatus, sizeof(g_compositionDumpStatus), "accessor returned null array"); return; }
+    const uint8_t* data = *(const uint8_t**)arr;
+    unsigned int count = *(const unsigned int*)((uintptr_t)arr + 8);
+    if (!data || count > 4096) { snprintf(g_compositionDumpStatus, sizeof(g_compositionDumpStatus), "implausible table (data=%p count=%u)", (void*)data, count); return; }
+
+    FILE* f = nullptr;
+    fopen_s(&f, g_dumpPath, "w");
+    if (!f) { snprintf(g_compositionDumpStatus, sizeof(g_compositionDumpStatus), "could not open convoy_composition_dump.txt"); return; }
+    fprintf(f, "CAIConstantsProfilesManager convoy composition table: %u profiles (SAIProfile stride 0x38)\n\n", count);
+    for (unsigned int i = 0; i < count; i++) {
+        const uint8_t* prof = data + (size_t)i * 0x38;
+        unsigned long long id = *(const unsigned long long*)prof;
+        const uint8_t* fData = *(const uint8_t* const*)(prof + 0x08); unsigned int fN = *(const unsigned int*)(prof + 0x10);
+        const uint8_t* hData = *(const uint8_t* const*)(prof + 0x18); unsigned int hN = *(const unsigned int*)(prof + 0x20);
+        const uint8_t* sData = *(const uint8_t* const*)(prof + 0x28); unsigned int sN = *(const unsigned int*)(prof + 0x30);
+        fprintf(f, "profile[%u] m_ID=0x%016llX (low32 %u / %d)  floats=%u hashes=%u strings=%u\n", i, id, (unsigned)id, (int)(unsigned)id, fN, hN, sN);
+        if (fData && fN < 1024) for (unsigned int k = 0; k < fN; k++) {
+            unsigned long long key = *(const unsigned long long*)(fData + k * 16); float v = *(const float*)(fData + k * 16 + 8);
+            fprintf(f, "  float  [%u] key=0x%016llX (%u)  value=%g\n", k, key, (unsigned)key, v);
+        }
+        if (hData && hN < 1024) for (unsigned int k = 0; k < hN; k++) {
+            unsigned long long key = *(const unsigned long long*)(hData + k * 16); unsigned long long v = *(const unsigned long long*)(hData + k * 16 + 8);
+            fprintf(f, "  hash   [%u] key=0x%016llX (%u)  value=0x%016llX (%u)\n", k, key, (unsigned)key, v, (unsigned)v);
+        }
+        if (sData && sN < 1024) for (unsigned int k = 0; k < sN; k++) {
+            unsigned long long key = *(const unsigned long long*)(sData + k * 16); const char* v = *(const char* const*)(sData + k * 16 + 8);
+            fprintf(f, "  string [%u] key=0x%016llX (%u)  value=\"%s\"\n", k, key, (unsigned)key, v ? v : "(null)");
+        }
+        fprintf(f, "\n");
+    }
+    fclose(f);
+    g_compositionDumpDone = true;
+    snprintf(g_compositionDumpStatus, sizeof(g_compositionDumpStatus), "wrote %u profiles to convoy_composition_dump.txt", count);
+}
+#else
+static void DumpCompositionProfiles() {}
+#endif
+
+// ---- Convoy composition patch: extra escorts (2026-09-21, test) ----
+// The dump (convoy_compositions_resolved.txt) confirmed the model: every
+// profile's m_KeyValuesHash is { Leader -> leader vehicle, <slot> -> escort
+// vehicle, ... }, 1 leader + 4..9 escorts, and IterateGuards simply walks
+// that array. So "more cars" = a longer array. On the first successful
+// Resolve (table guaranteed loaded), each profile gets a fresh, larger
+// array: the original entries, then COMPOSITION_EXTRA_ESCORTS extra entries
+// whose vehicle is copied round-robin from the profile's own escorts and
+// whose slot key is a new unique hash (Jenkins of "ModGuard1".."ModGuard8",
+// precomputed) -- the CCMap slot tracking is keyed on that hash, so the
+// keys must be unique and must not be the Leader key (0x6FBB4E7F, which
+// IterateGuards skips). The old arrays are left untouched (never freed;
+// they belong to the loaded resource). The mm3030 mission convoy's profile
+// (0xF6F655B0, landmover) is skipped: it is scripted mission content.
+// UNVERIFIED: whether road formations / despawn / CCMap cope with more
+// slots than any shipped profile has (max shipped is 10 entries). Start
+// with +2. Test on save 4 only.
+const int COMPOSITION_EXTRA_ESCORTS = 2;
+const unsigned long long COMPOSITION_LEADER_KEY = 0x6FBB4E7Full; // "Leader"
+
+// Vehicle-name hashes seen in the composition table (resolved by brute force,
+// see convoy_composition_names.json). The spawn system draws vehicles from
+// pre-allocated pools per class (spawning/spawn_types.spawnresourcesc):
+// Scrotus light = 12 instances (spotter, spotter_armored, fire_raider),
+// medium = 7 (rammerhead, metalgrinder), heavy = 3 -- shared with every
+// other Scrotus car in the world. The first +2 build copied a profile's own
+// first escorts, which on the big "_db" profiles meant 2 more MEDIUMS on top
+// of 4-5 -> SpawnResourcesLoaded failed for one id -> the whole batch was
+// dropped and retried forever (dust cloud, no cars). Extras are therefore
+// always LIGHT-class now.
+struct VehicleName { unsigned int hash; const char* name; };
+static const VehicleName g_vehicleNames[] = {
+    { 0x73989A77u, "scrotus_spotter" }, { 0x44E7989Bu, "scrotus_spotter_armored" }, { 0x0C15F832u, "scrotus_spotter_mm3030" },
+    { 0xE12E9B14u, "scrotus_rammerhead" }, { 0x923BD84Fu, "scrotus_rammerhead_db" }, { 0x07D44A49u, "scrotus_rammerhead_mm3030" },
+    { 0xD72C2F79u, "scrotus_metalgrinder" }, { 0x06F6D475u, "scrotus_metalgrinder_db" }, { 0x7A36581Du, "scrotus_metalgrinder_mm3030" },
+    { 0x4180510Du, "scrotus_fire_raider" }, { 0x27515F9Fu, "scrotus_fire_raider_db" }, { 0x6FC80099u, "scrotus_fire_raider_mm3030" },
+    { 0x71CA9B2Eu, "scrotus_convoy_leader_fueler" }, { 0x9E0099F3u, "scrotus_convoy_leader_topdog" }, { 0xA56980F4u, "scrotus_convoy_leader_truck" },
+    { 0x66CBCEDBu, "scrotus_convoy_leader_landmover_mm3030" },
+};
+static const char* VehicleNameOf(unsigned long long v) {
+    for (const VehicleName& n : g_vehicleNames) if (n.hash == (unsigned int)v) return n.name;
+    return nullptr;
+}
+static const unsigned long long VEH_SPOTTER = 0x73989A77ull, VEH_FIRE_RAIDER = 0x4180510Dull, VEH_FIRE_RAIDER_DB = 0x27515F9Full,
+                                VEH_RAMMERHEAD_DB = 0x923BD84Full, VEH_METALGRINDER_DB = 0x06F6D475ull;
+const unsigned long long COMPOSITION_SKIP_PROFILE_ID = 0xF6F655B0ull; // mm3030 landmover convoy
+// v2 of the patch (2026-09-21, after a live crash "when approaching the
+// convoy" with invented slot keys): every shipped profile uses the SAME nine
+// escort slot keys in the SAME order (a 4-escort profile uses the first
+// four, the mm3030 profile all nine) -- almost certainly formation
+// positions defined per slot elsewhere in the engine, so an unknown key has
+// no position to take. Extra escorts therefore reuse the next unused keys
+// of that canonical sequence, and a profile never exceeds nine escorts.
+// Slots 1-9 are the game's own point names (convoy_map defines 1-7, the
+// mm3030 landmover map 1-9). Slots 10-12 are ours ("ModSlot10".."ModSlot12",
+// Jenkins) and only exist in the modded convoy_map shipped as
+// dropzone/global/car_combat.blo (12 points: the 7 originals + 5 behind the
+// convoy at z = 60..100 m). Without that dropzone file the engine cap is 7.
+static const unsigned long long g_canonicalEscortSlotKeys[12] = {
+    0xD89FB74Bull, 0xD950BF1Eull, 0xE4CE1F86ull, 0x4381CB33ull, 0xB1CBD58Bull,
+    0xB49EC145ull, 0x4DA5C974ull, 0x23DDBD0Dull, 0x928325D0ull,
+    0x2257A626ull, 0xBEF5FB0Eull, 0x73C7B796ull,
+};
+// How many formation points convoy_map actually has. The stock map defines 7;
+// asking for an escort slot it does not define makes the game dereference a
+// null map point and crash (confirmed 2026-09-21). The mod ships a modded
+// dropzone/global/car_combat.blo with 12 points, so the cap is raised only
+// when that file is present AND contains the new point name hashes.
+int g_convoyMapPoints = 7;
+char g_convoyMapStatus[128] = "stock map assumed (7 formation points)";
+static void DetectConvoyMapPoints() {
+    char path[MAX_PATH];
+    snprintf(path, MAX_PATH, "%s..\\dropzone\\global\\car_combat.blo", g_modDir);
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "rb") != 0 || !f) { snprintf(g_convoyMapStatus, sizeof(g_convoyMapStatus), "no dropzone car_combat.blo -> 7 escort slots"); return; }
+    static unsigned char buf[1 << 20];
+    size_t n = fread(buf, 1, sizeof(buf), f);
+    fclose(f);
+    const unsigned int wanted[3] = { 0x2257A626u, 0xBEF5FB0Eu, 0x73C7B796u }; // ModSlot10..12 (12-point map marker)
+    int found = 0;
+    for (unsigned int w : wanted)
+        for (size_t i = 0; i + 4 <= n; i++)
+            if (*(const unsigned int*)(buf + i) == w) { found++; break; }
+    // Cap at 9 even with the 12-point map: the limit that actually bites is the
+    // per-class vehicle pool in spawn_types, not formation points, and 9 is the
+    // largest escort count the game itself ships (the mm3030 landmover convoy).
+    if (found == 3) { g_convoyMapPoints = 9; snprintf(g_convoyMapStatus, sizeof(g_convoyMapStatus), "modded car_combat.blo found -> up to 9 escort slots"); }
+    else snprintf(g_convoyMapStatus, sizeof(g_convoyMapStatus), "dropzone car_combat.blo present but not the modded one (%d/3 markers) -> 7 escort slots", found);
+}
+
+bool g_compositionPatchDone = false;
+int g_compositionPatchedProfiles = 0;
+int g_compositionPatchSkipped = 0;
+char g_compositionPatchStatus[160] = "not applied yet";
+
+static void PatchCompositionProfiles() {
+    if (g_compositionPatchDone) return;
+    if (!g_aiConstantsManagerPtr || !CompositionTableAccessor) { snprintf(g_compositionPatchStatus, sizeof(g_compositionPatchStatus), "composition signatures not resolved on this exe"); return; }
+    void* manager = *g_aiConstantsManagerPtr;
+    if (!manager) { snprintf(g_compositionPatchStatus, sizeof(g_compositionPatchStatus), "manager null"); return; }
+    void* handle = *(void**)((uintptr_t)manager + 0x60);
+    if (!handle) { snprintf(g_compositionPatchStatus, sizeof(g_compositionPatchStatus), "resource handle null"); return; }
+    void* arr = nullptr;
+    CompositionTableAccessor(handle, &arr);
+    if (!arr) { snprintf(g_compositionPatchStatus, sizeof(g_compositionPatchStatus), "table null"); return; }
+    uint8_t* data = *(uint8_t**)arr;
+    unsigned int count = *(unsigned int*)((uintptr_t)arr + 8);
+    if (!data || count > 4096) { snprintf(g_compositionPatchStatus, sizeof(g_compositionPatchStatus), "implausible table"); return; }
+
+    const int extra = COMPOSITION_EXTRA_ESCORTS > 8 ? 8 : COMPOSITION_EXTRA_ESCORTS;
+    for (unsigned int i = 0; i < count; i++) {
+        uint8_t* prof = data + (size_t)i * 0x38;
+        unsigned long long id = *(unsigned long long*)prof;
+        unsigned long long* hData = *(unsigned long long**)(prof + 0x18);
+        unsigned int hN = *(unsigned int*)(prof + 0x20);
+        if (!hData || hN == 0 || hN > 64) { g_compositionPatchSkipped++; continue; }
+        if ((id & 0xFFFFFFFFull) == COMPOSITION_SKIP_PROFILE_ID) { g_compositionPatchSkipped++; continue; }
+
+        // collect escort entries (everything but the Leader) to copy vehicles from
+        unsigned int escortIdx[64]; unsigned int escorts = 0;
+        for (unsigned int k = 0; k < hN; k++) if (hData[k * 2] != COMPOSITION_LEADER_KEY) escortIdx[escorts++] = k;
+        if (escorts == 0) { g_compositionPatchSkipped++; continue; }
+
+        // which canonical slot keys does this profile already use?
+        bool used[12] = { false };
+        for (unsigned int k = 0; k < hN; k++)
+            for (int c = 0; c < 12; c++) if (hData[k * 2] == g_canonicalEscortSlotKeys[c]) used[c] = true;
+        // v3 (2026-09-21, after the captured crash): the slot keys are the
+        // names of SCarCombatMapPosition points in global/car_combat.blo, and
+        // regular convoys use "convoy_map", which defines exactly slots 1-7.
+        // Slot 8 (0x23DDBD0D) exists only in the mm3030 landmover map -- the
+        // captured crash was ResolveMapPointCritical(0x23DDBD0D) returning
+        // null on a regular leader. So never go past the 7 points the map
+        // has; more than that needs extra points added to convoy_map itself.
+        const int CONVOY_MAP_POINTS = g_convoyMapPoints;
+        unsigned long long freeKeys[12]; int freeCount = 0;
+        for (int c = 0; c < CONVOY_MAP_POINTS; c++) if (!used[c]) freeKeys[freeCount++] = g_canonicalEscortSlotKeys[c];
+        int add = extra < freeCount ? extra : freeCount;
+        if (add <= 0) { g_compositionPatchSkipped++; continue; } // already using every point convoy_map defines
+
+        unsigned long long* fresh = (unsigned long long*)malloc((size_t)(hN + add) * 16);
+        if (!fresh) { g_compositionPatchSkipped++; continue; }
+        memcpy(fresh, hData, (size_t)hN * 16);
+        // The big "_db" profiles (convoys 3/8/10, 6-7 escorts already) are left
+        // alone: with extra escorts their spawn batch never completes --
+        // SpawnHoldAfterResourcesLoaded stops firing, so SpawnBegin/End never
+        // pairs up and the global batch flag (CSpawnedEntityHandler+0x18E,
+        // which SpawnMultipleEntitiesAvailable simply reads) stays set, making
+        // every convoy retry forever: dust cloud, no cars. Enlarging the
+        // per-class vehicle pools did not change this, so the cause is in the
+        // resource-hold path, not the pools. Small and medium convoys take the
+        // +2 happily (verified in game: a 5-car convoy became 7).
+        bool dbProfile = false;
+        for (unsigned int k = 0; k < hN; k++) {
+            unsigned long long v = hData[k * 2 + 1];
+            if (v == VEH_RAMMERHEAD_DB || v == VEH_METALGRINDER_DB || v == VEH_FIRE_RAIDER_DB) dbProfile = true;
+        }
+        if (dbProfile || hN >= 8) { g_compositionPatchSkipped++; continue; }
+        for (int e = 0; e < add; e++) {
+            fresh[(hN + e) * 2 + 0] = freeKeys[e];             // next unused canonical slot key
+            // light-class vehicle only (12-instance pool): alternate spotter / fire raider;
+            // "_db" profiles get the _db fire raider (the only light _db entity we know exists)
+            fresh[(hN + e) * 2 + 1] = (e % 2) ? VEH_FIRE_RAIDER : VEH_SPOTTER;   // light class only
+        }
+        *(unsigned long long**)(prof + 0x18) = fresh;
+        *(unsigned int*)(prof + 0x20) = hN + add;
+        g_compositionPatchedProfiles++;
+    }
+    g_compositionPatchDone = true;
+    LogLine("EVENT composition patch: +%d escorts on %d profiles (%d skipped)", extra, g_compositionPatchedProfiles, g_compositionPatchSkipped);
+    snprintf(g_compositionPatchStatus, sizeof(g_compositionPatchStatus), "+%d escorts on %d convoy types (%d left stock: the big ones and the story convoy)", extra, g_compositionPatchedProfiles, g_compositionPatchSkipped);
+}
+
+DEFHOOK(bool, ResolveConvoysComposition, (void* thiz, unsigned int id, void** outProfile)) {
+    bool ok = ResolveConvoysComposition_orig(thiz, id, outProfile);
+    g_compositionResolveCalls++;
+    g_compositionLastId = id;
+    g_compositionLastOk = ok;
+    {
+        static unsigned int seen[32]; static int nseen = 0; bool isNew = true;
+        for (int i = 0; i < nseen; i++) if (seen[i] == id) { isNew = false; break; }
+        if (isNew && nseen < 32) seen[nseen++] = id;
+        if (isNew) LogLine("EVENT composition resolved for id %u (%d): %s, %u hash entries", id, (int)id, ok ? "found" : "NOT FOUND",
+            (ok && outProfile && *outProfile) ? *(const unsigned int*)((uintptr_t)*outProfile + 0x20) : 0u);
+    }
+    if (ok && outProfile && *outProfile) {
+        if (!g_compositionDumpDone) DumpCompositionProfiles();   // dump the vanilla table first
+        if (!g_compositionPatchDone) PatchCompositionProfiles();  // then extend it, before IterateGuards reads the count
+        g_compositionLastGuardEntries = (int)*(const unsigned int*)((uintptr_t)*outProfile + 0x20);
+        LogLine("EVENT convoy spawning with composition id %u: %d entries after patch (1 leader + %d escorts)", id, g_compositionLastGuardEntries, g_compositionLastGuardEntries - 1);
+        {
+            const unsigned long long* h = *(const unsigned long long* const*)((uintptr_t)*outProfile + 0x18);
+            unsigned int n = *(const unsigned int*)((uintptr_t)*outProfile + 0x20);
+            int light = 0, medium = 0;
+            for (unsigned int k = 0; h && k < n && k < 32; k++) {
+                const char* nm = VehicleNameOf(h[k * 2 + 1]);
+                LogLine("    slot %08X -> %08X %s", (unsigned)h[k * 2], (unsigned)h[k * 2 + 1], nm ? nm : "(unresolved name)");
+                if (nm && (strstr(nm, "spotter") || strstr(nm, "fire_raider"))) light++;
+                if (nm && (strstr(nm, "rammerhead") || strstr(nm, "metalgrinder"))) medium++;
+            }
+            LogLine("    pool use (known names only): light %d of 12, medium %d of 7", light, medium);
+        }
+    }
+    return ok;
+}
+
+// ---- Crash stack capture (2026-09-21, dev only) ----
+// Two live crashes with the composition patch, both at AVAMain.exe+0x9E1277
+// = CQuaternion::ToMatrix4 reading through a null `this` (per the Windows
+// Application Error events). The fault site alone doesn't say WHO passed
+// the null transform, and static analysis found 49 distinct callers. This
+// vectored exception handler runs before the OS crash dialog: on the first
+// access violation it writes the register state and a StackWalk64 of the
+// faulting thread (module+offset per frame, resolved offline against the
+// PDB) to scripts\convoy_crash_stack.txt, then lets the crash proceed
+// unchanged (EXCEPTION_CONTINUE_SEARCH). Read-only, no game state touched.
+static volatile long g_crashCaptured = 0;
+
+static LONG CALLBACK CrashStackHandler(EXCEPTION_POINTERS* ep) {
+    if (!ep || !ep->ExceptionRecord || !ep->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_INT_DIVIDE_BY_ZERO)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (InterlockedExchange(&g_crashCaptured, 1) != 0) return EXCEPTION_CONTINUE_SEARCH;
+
+    LogLine("CRASH: exception 0x%08X at %p -- stack written to convoy_crash_stack.txt", (unsigned)code, ep->ExceptionRecord->ExceptionAddress);
+    FILE* f = nullptr;
+    fopen_s(&f, g_crashPath, "w");
+    if (!f) return EXCEPTION_CONTINUE_SEARCH;
+
+    CONTEXT ctx = *ep->ContextRecord;
+    uintptr_t exeBase = (uintptr_t)GetModuleHandleA(NULL);
+    HMODULE self = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)&CrashStackHandler, &self);
+    uintptr_t asiBase = (uintptr_t)self;
+
+    fprintf(f, "build %s\n", MM_BUILD_TAG);
+    fprintf(f, "exception 0x%08X at %p", (unsigned)code, ep->ExceptionRecord->ExceptionAddress);
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2)
+        fprintf(f, "  (%s address %p)", ep->ExceptionRecord->ExceptionInformation[0] ? "write" : "read", (void*)ep->ExceptionRecord->ExceptionInformation[1]);
+    fprintf(f, "\nexe base %p   asi base %p\n", (void*)exeBase, (void*)asiBase);
+    fprintf(f, "rax=%016llX rbx=%016llX rcx=%016llX rdx=%016llX\nrsi=%016llX rdi=%016llX rbp=%016llX rsp=%016llX\nr8 =%016llX r9 =%016llX r10=%016llX r11=%016llX\nr12=%016llX r13=%016llX r14=%016llX r15=%016llX\n",
+        ctx.Rax, ctx.Rbx, ctx.Rcx, ctx.Rdx, ctx.Rsi, ctx.Rdi, ctx.Rbp, ctx.Rsp, ctx.R8, ctx.R9, ctx.R10, ctx.R11, ctx.R12, ctx.R13, ctx.R14, ctx.R15);
+
+    HANDLE proc = GetCurrentProcess();
+    HANDLE thr = GetCurrentThread();
+    SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
+    SymInitialize(proc, NULL, TRUE);
+    STACKFRAME64 sf = {};
+    sf.AddrPC.Offset = ctx.Rip;    sf.AddrPC.Mode = AddrModeFlat;
+    sf.AddrFrame.Offset = ctx.Rbp; sf.AddrFrame.Mode = AddrModeFlat;
+    sf.AddrStack.Offset = ctx.Rsp; sf.AddrStack.Mode = AddrModeFlat;
+    fprintf(f, "\nstack (StackWalk64):\n");
+    for (int i = 0; i < 64; i++) {
+        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, thr, &sf, &ctx, NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL)) break;
+        uintptr_t pc = (uintptr_t)sf.AddrPC.Offset;
+        if (!pc) break;
+        HMODULE m = nullptr;
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)pc, &m);
+        char modName[MAX_PATH] = "?";
+        if (m) GetModuleFileNameA(m, modName, sizeof(modName));
+        const char* base = strrchr(modName, '\\'); base = base ? base + 1 : modName;
+        fprintf(f, "  #%02d %p  %s+0x%llX\n", i, (void*)pc, base, (unsigned long long)(m ? pc - (uintptr_t)m : pc));
+    }
+    // raw stack words as a fallback for the offline resolver
+    fprintf(f, "\nraw stack (first 96 qwords from rsp):\n");
+    const unsigned long long* sp = (const unsigned long long*)ep->ContextRecord->Rsp;
+    for (int i = 0; i < 96; i++) {
+        unsigned long long v = 0;
+        __try { v = sp[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
+        if (v >= exeBase && v < exeBase + 0x01AA8000ull) fprintf(f, "  [%02d] %016llX  exe+0x%llX\n", i, v, v - exeBase);
+        else if (asiBase && v >= asiBase && v < asiBase + 0x100000ull) fprintf(f, "  [%02d] %016llX  asi+0x%llX\n", i, v, v - asiBase);
+    }
+    fclose(f);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 // ---- Convoy respawn v2: automatic, gated on the game's own wreck lifecycle (2026-09-20) ----
 // How the game actually handles a wrecked convoy (from tracing the .gsrc
 // files with gsrc_trace.py, wiring format solved the same day): on wreck, the
@@ -546,6 +1098,8 @@ struct TrackedConvoy {
     int respawns;
     bool foundThisSweep;
     int stateZeroSweeps;  // consecutive sweeps seen at state 0 with no processor
+    bool prevWrecked, prevArmed, prevFound;
+    int prevGraphState;
 };
 static TrackedConvoy g_tracked[sizeof(g_convoyPairs) / sizeof(g_convoyPairs[0])] = {};
 static float g_sweepAccum = 0.0f;
@@ -610,6 +1164,9 @@ static void ConvoyRespawnSweep(float elapsed, bool force) {
         if ((*flags & ~0x3) != 0) { t.armed = false; continue; } // not a sane EFlags byte, leave it alone
         t.wrecked = (*flags & 0x1) != 0;
         t.graphState = *(int*)((uintptr_t)graphObj + 0xE0);
+        if (!t.prevFound) { LogLine("convoy %2d: found (wrecked=%d, graph state %d)", i + 1, t.wrecked, t.graphState); t.prevFound = true; t.prevWrecked = t.wrecked; t.prevGraphState = t.graphState; }
+        if (t.wrecked != t.prevWrecked) { LogLine("convoy %2d: %s", i + 1, t.wrecked ? "WRECKED (flag set)" : "wrecked flag cleared"); t.prevWrecked = t.wrecked; }
+        if (t.graphState != t.prevGraphState) { LogLine("convoy %2d: graph state %d -> %d", i + 1, t.prevGraphState, t.graphState); t.prevGraphState = t.graphState; }
 
         if (!t.wrecked) {
             t.armed = false;
@@ -619,7 +1176,7 @@ static void ConvoyRespawnSweep(float elapsed, bool force) {
             // (and are registered normally), so only act after it has sat
             // there across two consecutive sweeps (>= 1 s).
             if (t.graphState == 0 && *(void**)((uintptr_t)graphObj + 0xF0) == nullptr) {
-                if (++t.stateZeroSweeps >= 2) { GameObjectAddToUpdate(graphObj); t.stateZeroSweeps = 0; }
+                if (++t.stateZeroSweeps >= 2) { GameObjectAddToUpdate(graphObj); t.stateZeroSweeps = 0; LogLine("convoy %2d: stuck at graph state 0 with no processor -> AddToUpdate()", i + 1); }
             } else {
                 t.stateZeroSweeps = 0;
             }
@@ -630,6 +1187,7 @@ static void ConvoyRespawnSweep(float elapsed, bool force) {
         if (!t.armed) {
             t.armed = true;
             t.delayRemaining = RandomDelaySeconds();
+            LogLine("convoy %2d: wreck flow finished (graph state 4) -> respawn armed, delay %.0fs", i + 1, t.delayRemaining);
         } else {
             t.delayRemaining -= elapsed;
         }
@@ -654,6 +1212,18 @@ static void ConvoyRespawnSweep(float elapsed, bool force) {
         t.armed = false;
         t.respawns++;
         g_totalAutoRespawns++;
+        LogLine("convoy %2d: RESPAWN triggered%s (player %.0fm from wreck, total this session %d)", i + 1, force ? " by F4/F9" : "", t.lastDistance, g_totalAutoRespawns);
+    }
+}
+
+static void LogConvoySnapshot(const char* why) {
+    LogLine("--- snapshot (%s): sweeps %d, auto-respawns %d, player at %.0f %.0f %.0f", why, g_sweepCount, g_totalAutoRespawns, g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z);
+    for (int i = 0; i < g_convoyPairCount; i++) {
+        const TrackedConvoy& t = g_tracked[i];
+        if (!t.foundThisSweep) { LogLine("    convoy %2d: not found", i + 1); continue; }
+        if (!t.wrecked) LogLine("    convoy %2d: active (graph state %d) respawns %d", i + 1, t.graphState, t.respawns);
+        else if (!t.armed) LogLine("    convoy %2d: WRECKED, wreck flow running (graph state %d)", i + 1, t.graphState);
+        else LogLine("    convoy %2d: WRECKED, respawn in %.0fs, player %.0fm from wreck", i + 1, t.delayRemaining, t.lastDistance);
     }
 }
 
@@ -664,6 +1234,9 @@ static void ConvoyRespawnTick(float dt) {
     float elapsed = g_sweepAccum;
     g_sweepAccum = 0.0f;
     ConvoyRespawnSweep(elapsed, false);
+    static float sinceSnapshot = 0.0f;
+    sinceSnapshot += elapsed;
+    if (sinceSnapshot >= 60.0f) { sinceSnapshot = 0.0f; LogConvoySnapshot("periodic"); }
 }
 
 // Release overlay: small, silent-by-default status the mod author needs
@@ -677,7 +1250,7 @@ class ConvoyModOverlay : public ImGuiRenderer {
 			ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
 
 		ImGui::Text("Build: %s", MM_BUILD_TAG);
-		ImGui::Text("Convoy Respawn Mod: %s  |  game version check: %s", enabledConvoyNeverWrecked ? "ACTIVE" : "off", g_gameVersionStatus);
+		ImGui::Text("Enhanced Convoys: %s  |  game check: %s", enabledConvoyNeverWrecked ? "ACTIVE" : "off", g_gameVersionStatus);
 		{
 			int wrecked = 0, armed = 0;
 			for (int i = 0; i < g_convoyPairCount; i++) { if (g_tracked[i].foundThisSweep && g_tracked[i].wrecked) wrecked++; if (g_tracked[i].armed) armed++; }
@@ -689,11 +1262,16 @@ class ConvoyModOverlay : public ImGuiRenderer {
 		if (g_showDiagnostics) {
 			ImGui::Separator();
 			ImGui::Text("SetWrecked hook install: %s", g_convoySetWreckedHookInstallStatus);
-			ImGui::Text("ConvoyDataSetWrecked calls: %d  (container resolved: %d, resolve failed: %d)",
-				g_convoySetWreckedCalls, g_convoySetWreckedCleared, g_convoySetWreckedResolveFailed);
-			ImGui::Text("  Trigger pin seen on last call: %u  |  resolving container via variable-pin hash %u", g_lastConvoySetWreckedRealPin, CONVOY_NODE_CONTAINER_PIN_HASH);
+			ImGui::Text("ConvoyDataSetWrecked calls: %d", g_convoySetWreckedCalls);
+			ImGui::Text("Resolved game addresses (by byte signature):");
+			for (int i = 0; i < SIG_COUNT; i++)
+				ImGui::Text("  %-70s %s %p%s", g_sigs[i].name, g_sigs[i].matches == 1 ? "OK " : "-- ", (void*)g_sigs[i].resolved,
+					g_sigs[i].matches == 1 ? "" : (g_sigs[i].required ? "  (REQUIRED, not found)" : "  (optional, not found)"));
 			ImGui::Text("Reset ALL known convoys (F4): last run -> found %d, cleared %d, skipped(sanity) %d",
 				g_resetConvoysLastFound, g_resetConvoysLastCleared, g_resetConvoysLastSkippedSanity);
+			ImGui::Text("Escort boost: %s  |  hook %s  |  %s", g_compositionPatchStatus, g_compositionResolveHookInstallStatus, g_convoyMapStatus);
+			ImGui::Text("  ResolveConvoysComposition calls: %d  |  last id: %u (%d)  %s  |  guard entries in last profile: %d",
+				g_compositionResolveCalls, g_compositionLastId, (int)g_compositionLastId, g_compositionLastOk ? "found" : "NOT FOUND", g_compositionLastGuardEntries);
 			ImGui::Separator();
 			ImGui::Text("  AddToUpdate() calls (re-registering rebuilt graph objects): %d", g_addToUpdateCalls);
 			ImGui::Text("Respawn v2 sweep: every %.0fs (%d done)  |  delay %.0f-%.0fs after the wreck flow finishes (graph state %d)  |  player must be > %.0fm from the wreck",
@@ -724,6 +1302,7 @@ class ConvoyModOverlay : public ImGuiRenderer {
 			ImGui::Text("Set CURRENT vehicle engine torque scale to %.1fx (F7): pressed %d time(s)", g_testTorqueScale, g_setTorquePresses);
 			ImGui::Text("Reset convoys + SpawnSystemReset, no area change (F8): pressed %d time(s)", g_spawnSystemResetPresses);
 			ImGui::Text("  -> watch the map/HUD Threat display before and after pressing F8");
+			ImGui::Separator();
 			ImGui::Separator();
 			ImGui::Text("Convoy graph object captures: %d  (path-hash mismatches: %d)", g_convoyGraphObjectCaptures, g_convoyGraphObjectCaptureMismatches);
 			ImGui::Text("  Last graph path hash read: %u  (expect %u for convoy_choreographer.gsr)", g_lastConvoyGraphPathHash, CONVOY_CHOREOGRAPHER_PATH_HASH);
@@ -871,6 +1450,16 @@ DEFHOOK(void, CPlayer__UpdateController, (void* thiz, float dt)) {
         f7Pressed = false;
     }
 
+    if (GetAsyncKeyState(VK_F10) & 0x8000) {
+        if (!f10Pressed) {
+            f10Pressed = true;
+            DumpCompositionProfiles();
+        }
+    }
+    else {
+        f10Pressed = false;
+    }
+
     if (GetAsyncKeyState(VK_F8) & 0x8000) {
         if (!f8Pressed) {
             f8Pressed = true;
@@ -976,7 +1565,8 @@ DEFHOOK(void, CPlayer__UpdateController, (void* thiz, float dt)) {
 void PluginHooks() {
 	ImGuiRenderer::Install();
 
-    HookMgr::Install(ADDRESS(0x1404C6670, 0x1420DEAC0), CPlayer__UpdateController_hook, CPlayer__UpdateController_orig);
+    CGameObject_FindOptional = (FindOptionalFn)g_sigs[SIG_FINDOPTIONAL].resolved;
+    HookMgr::Install(g_sigs[SIG_UPDATECONTROLLER].resolved, CPlayer__UpdateController_hook, CPlayer__UpdateController_orig);
 
     // Addresses from AVAMain_F.pdb, verified 2026-09-15 by parsing the user's
     // own AVAMain.exe PE headers and confirming the RVA lands on a real
@@ -985,25 +1575,57 @@ void PluginHooks() {
     // dual-address hook and wrongly skipped this one entirely on a non-Steam
     // build in an earlier test).
     {
-        MH_STATUS createStatus = MH_CreateHook((LPVOID)0x1402BDB20, (LPVOID)ConvoyDataSetWrecked_hook, (LPVOID*)&ConvoyDataSetWrecked_orig);
+        LPVOID target = (LPVOID)g_sigs[SIG_SETWRECKED].resolved;
+        MH_STATUS createStatus = MH_CreateHook(target, (LPVOID)ConvoyDataSetWrecked_hook, (LPVOID*)&ConvoyDataSetWrecked_orig);
         if (createStatus == MH_OK) {
-            MH_STATUS enableStatus = MH_EnableHook((LPVOID)0x1402BDB20);
+            MH_STATUS enableStatus = MH_EnableHook(target);
             g_convoySetWreckedHookInstallStatus = MH_StatusToString(enableStatus);
         } else {
             g_convoySetWreckedHookInstallStatus = MH_StatusToString(createStatus);
         }
     }
 
+    // Composition: more escorts (release). Optional signatures -- if any of
+    // them is missing the mod simply keeps vanilla convoy compositions.
+    {
+        if (g_sigs[SIG_TABLEACCESSOR].matches == 1) CompositionTableAccessor = (ResourceTableAccessorFn)g_sigs[SIG_TABLEACCESSOR].resolved;
+        if (g_sigs[SIG_MANAGERPTR].matches == 1) g_aiConstantsManagerPtr = (void**)g_sigs[SIG_MANAGERPTR].resolved;
+        LPVOID target = (LPVOID)g_sigs[SIG_RESOLVECOMPOSITION].resolved;
+        MH_STATUS createStatus = target ? MH_CreateHook(target, (LPVOID)ResolveConvoysComposition_hook, (LPVOID*)&ResolveConvoysComposition_orig) : MH_ERROR_NOT_EXECUTABLE;
+        if (createStatus == MH_OK) {
+            MH_STATUS enableStatus = MH_EnableHook(target);
+            g_compositionResolveHookInstallStatus = MH_StatusToString(enableStatus);
+        } else {
+            g_compositionResolveHookInstallStatus = MH_StatusToString(createStatus);
+        }
+        LogLine("composition hook install: %s (%s)", g_compositionResolveHookInstallStatus, g_convoyMapStatus);
+    }
+
+    AddVectoredExceptionHandler(1, CrashStackHandler);
+
 #if MM_DEV_TOOLS
+    // Spawn-flow logging hooks (GOG addresses from AVAMain_F.pdb; dev only)
+    InstallLoggedNodeHook(0x140F76B00ull, (LPVOID)FireConnectionsLog_hook, (LPVOID*)&FireConnectionsLog_orig, "CProcessor::FireConnections");
+    InstallLoggedNodeHook(0x1402E2420ull, (LPVOID)RequestSpawnLog_hook, (LPVOID*)&RequestSpawnLog_orig, "RequestSpawn");
+    InstallLoggedNodeHook(0x1402BE010ull, (LPVOID)SpawnPossibleFailedLog_hook, (LPVOID*)&SpawnPossibleFailedLog_orig, "ConvoyMetricIsSpawnPossibleFailed");
+    InstallLoggedNodeHook(0x1402BFD10ull, (LPVOID)SpawningFailedLog_hook, (LPVOID*)&SpawningFailedLog_orig, "ConvoyMetricInProgressSpawningFailed");
+    InstallLoggedNodeHook(0x1402E2E80ull, (LPVOID)SpawnAvailableLog_hook, (LPVOID*)&SpawnAvailableLog_orig, "SpawnMultipleEntitiesAvailable");
+    InstallLoggedNodeHook(0x1402EBDD0ull, (LPVOID)SpawnHoldLog_hook, (LPVOID*)&SpawnHoldLog_orig, "SpawnHoldAfterResourcesLoaded");
+    InstallLoggedNodeHook(0x1402EBEA0ull, (LPVOID)SpawnResourcesLoadedLog_hook, (LPVOID*)&SpawnResourcesLoadedLog_orig, "SpawnResourcesLoaded");
+    InstallLoggedNodeHook(0x1402C3B30ull, (LPVOID)IterateGuardsLog_hook, (LPVOID*)&IterateGuardsLog_orig, "ConvoysCompositionIterateGuards");
+    InstallLoggedNodeHook(0x1402C3740ull, (LPVOID)CCMapIsBlockedLog_hook, (LPVOID*)&CCMapIsBlockedLog_orig, "ConvoyDataCCMapIsBlocked");
+
+
     // NGSONodes::SpawnStorm -- address from AVAMain_F.pdb (0x1402F0400), same
     // PDB/exe pairing already relied on for every other hook in this file.
     // No known GOG offset yet (found via a Steam-oriented PDB grep), so this
     // is installed unconditionally like ConvoyDataSetWrecked above, not via
     // the ADDRESS(gog, steam) macro.
     {
-        MH_STATUS createStatus = MH_CreateHook((LPVOID)0x1402F0400, (LPVOID)SpawnStorm_hook, (LPVOID*)&SpawnStorm_orig);
+        LPVOID target = (LPVOID)g_sigs[SIG_SPAWNSTORM].resolved;
+        MH_STATUS createStatus = target ? MH_CreateHook(target, (LPVOID)SpawnStorm_hook, (LPVOID*)&SpawnStorm_orig) : MH_ERROR_NOT_EXECUTABLE;
         if (createStatus == MH_OK) {
-            MH_STATUS enableStatus = MH_EnableHook((LPVOID)0x1402F0400);
+            MH_STATUS enableStatus = MH_EnableHook(target);
             g_spawnStormHookInstallStatus = MH_StatusToString(enableStatus);
         } else {
             g_spawnStormHookInstallStatus = MH_StatusToString(createStatus);
