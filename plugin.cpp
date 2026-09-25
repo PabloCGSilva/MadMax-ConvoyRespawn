@@ -28,10 +28,15 @@
 // Set to 1 for our own testing; a distributed build must ship with 0.
 #define MM_DEV_TOOLS 0
 
+// Storm presets moved to their own plugin, Wasteland Storms (WastelandStorms.asi,
+// 2026-09-23). Kept here, switched off, so both can be installed side by side
+// without two plugins answering F5/F11 and firing storms.
+#define MM_STORM_TOOLS 0
+
 // User-requested (2026-09-18): always show a visible tag for whatever
 // build is currently installed, so it's never ambiguous which test is
 // running. Bump this string every time a new test build goes out.
-#define MM_BUILD_TAG "v0.9.1-beta2c (2026-09-22)"
+#define MM_BUILD_TAG "v0.9.2-beta3 (2026-09-24)"
 
 // ---- Session event log (2026-09-21) ----
 // Replaces screenshot-driven debugging: every notable event (wreck seen,
@@ -65,6 +70,10 @@ static void LogLine(const char* fmt, ...) {
 }
 static void LogSessionStart() {
     g_logSessionStart = GetTickCount();
+    // keep the previous session's log (a quick relaunch used to wipe it)
+    char prev[MAX_PATH];
+    snprintf(prev, MAX_PATH, "%sconvoy_respawn_log.previous.txt", g_modDir);
+    MoveFileExA(g_logPath, prev, MOVEFILE_REPLACE_EXISTING);
     FILE* f = nullptr;
     if (fopen_s(&f, g_logPath, "w") == 0 && f) fclose(f);
 }
@@ -88,6 +97,8 @@ static void LogSessionStart() {
 // slot 0x138) are assumed identical between builds.
 static bool g_gameVersionOk = false;
 static void LogConvoySnapshot(const char* why);
+typedef void (*SendEventMsgFn)(const char* msg);   // NEvent::CSendEvent<...>::SendMsg; defined in the dev block below
+extern SendEventMsgFn SendEventMsg;
 static void DetectConvoyMapPoints();
 extern int g_convoyMapPoints;
 extern char g_convoyMapStatus[128];
@@ -99,25 +110,53 @@ struct GameSignature {
     bool required;          // release-critical; optional ones only gate dev features
     uintptr_t resolved;
     int matches;
+    bool alreadyHooked;     // found behind another mod's hook (E9 jmp at the start)
 };
 static GameSignature g_sigs[] = {
-    { "NGSONodes::ConvoyDataSetWrecked",       "40 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 50 48 89 6C 24 58 48 89 74 24 60 48 8B FA 48 8B F1 E8 ?? ?? ?? ?? 48 8B E8", true, 0, 0 },
-    { "CGameObject::FindOptional",             "48 8B C4 57 48 83 EC 70 48 C7 44 24 48 FE FF FF FF 48 89 58 08 48 89 70 10", true, 0, 0 },
-    { "CPlayer::UpdateController",             "48 8B C4 41 54 48 81 EC 90 00 00 00 48 C7 44 24 20 FE FF FF FF 48 89 58 08 48 89 68 10 48 89 70 18 48 89 78 20 0F 29 70 E8 0F 28 F1 48 8B E9 F3 0F 10 81 00 03 00 00", true, 0, 0 },
-    { "CGameObject::AddToUpdate",              "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B 01 80 A1 8C 00 00 00 FE", true, 0, 0 },
-    { "CGraphScriptGameObject::UpdatePostSim", "40 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 58 48 89 74 24 60 48 8B F2 48 8B D9 48 81 C1 C0 00 00 00", true, 0, 0 },
-    { "CAIConstantsProfilesManager::ResolveConvoysCompositionCritical", "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B 49 60 49 8B F0 8B FA", false, 0, 0 },
-    { "composition table accessor",            "0F B7 01 4C 8D 04 80 48 8B 41 08 48 8B 40 58 4A 8B 04 C0 48 89 02 33 C0", false, 0, 0 },
-    { "AI constants manager singleton (mov rcx,[rip] in IterateGuards)", "48 8B 0D ?? ?? ?? ?? 4C 8D 44 24 20 8B D3 48 89 6C 24 20 E8", false, 0, 0 },
-    { "NGSONodes::SpawnStorm",                 "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D 68 C8 48 81 EC 10 01 00 00 48 C7 45 D8 FE FF FF FF", false, 0, 0 },
+    { "NGSONodes::ConvoyDataSetWrecked",       "40 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 50 48 89 6C 24 58 48 89 74 24 60 48 8B FA 48 8B F1 E8 ?? ?? ?? ?? 48 8B E8", true, 0, 0, false },
+    { "CGameObject::FindOptional",             "48 8B C4 57 48 83 EC 70 48 C7 44 24 48 FE FF FF FF 48 89 58 08 48 89 70 10", true, 0, 0, false },
+    { "CPlayer::UpdateController",             "48 8B C4 41 54 48 81 EC 90 00 00 00 48 C7 44 24 20 FE FF FF FF 48 89 58 08 48 89 68 10 48 89 70 18 48 89 78 20 0F 29 70 E8 0F 28 F1 48 8B E9 F3 0F 10 81 00 03 00 00", true, 0, 0, false },
+    { "CGameObject::AddToUpdate",              "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B 01 80 A1 8C 00 00 00 FE", true, 0, 0, false },
+    { "CGraphScriptGameObject::UpdatePostSim", "40 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 58 48 89 74 24 60 48 8B F2 48 8B D9 48 81 C1 C0 00 00 00", true, 0, 0, false },
+    { "CAIConstantsProfilesManager::ResolveConvoysCompositionCritical", "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B 49 60 49 8B F0 8B FA", false, 0, 0, false },
+    { "composition table accessor",            "0F B7 01 4C 8D 04 80 48 8B 41 08 48 8B 40 58 4A 8B 04 C0 48 89 02 33 C0", false, 0, 0, false },
+    { "AI constants manager singleton (mov rcx,[rip] in IterateGuards)", "48 8B 0D ?? ?? ?? ?? 4C 8D 44 24 20 8B D3 48 89 6C 24 20 E8", false, 0, 0, false },
+    { "NGSONodes::SpawnStorm",                 "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D 68 C8 48 81 EC 10 01 00 00 48 C7 45 D8 FE FF FF FF", false, 0, 0, false },
+    { "CCharacter::GetVehiclePtr",             "48 89 5C 24 10 57 48 83 EC 30 48 81 C1 C0 01 00 00 48 8D 54 24 20 48 8B 01 FF 50 60 48 8B 5C 24 28 48 8B 38", false, 0, 0, false },
+    { "NGraphScript::CProcessor::FireStart",   "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 8B FA 48 8B D9", false, 0, 0, false },
 };
 enum { SIG_SETWRECKED = 0, SIG_FINDOPTIONAL, SIG_UPDATECONTROLLER, SIG_ADDTOUPDATE, SIG_UPDATEPOSTSIM,
-       SIG_RESOLVECOMPOSITION, SIG_TABLEACCESSOR, SIG_MANAGERPTR, SIG_SPAWNSTORM, SIG_COUNT };
+       SIG_RESOLVECOMPOSITION, SIG_TABLEACCESSOR, SIG_MANAGERPTR, SIG_SPAWNSTORM, SIG_GETVEHICLEPTR, SIG_FIRESTART, SIG_COUNT };
+
+typedef void* (*CharacterGetVehicleFn)(void* character);
+static CharacterGetVehicleFn CharacterGetVehiclePtr = nullptr; // from g_sigs[SIG_GETVEHICLEPTR]
+static bool g_overlayAvailable = false;   // the SDK's own hard-coded addresses (overlay) only fit two known builds
 
 static uintptr_t g_exeBase = 0;
 static uintptr_t g_textStart = 0, g_textEnd = 0;
 static unsigned int g_exeTimeStamp = 0, g_exeImageSize = 0;
 
+static bool ScanBytes(const unsigned char* bytes, const bool* wild, int len, GameSignature& sig) {
+    sig.matches = 0; sig.resolved = 0;
+    const unsigned char* p = (const unsigned char*)g_textStart;
+    const unsigned char* end = (const unsigned char*)g_textEnd - len;
+    for (; p <= end; p++) {
+        if (!wild[0] && p[0] != bytes[0]) continue;
+        int i = 1;
+        for (; i < len; i++) if (!wild[i] && p[i] != bytes[i]) break;
+        if (i == len) {
+            if (++sig.matches == 1) sig.resolved = (uintptr_t)p;
+            else break;
+        }
+    }
+    return sig.matches == 1;
+}
+
+// Another ASI may already have hooked the same function (Enhanced Convoys and
+// Wasteland Storms both hook CPlayer::UpdateController). MinHook replaces the
+// first 5 bytes with `jmp rel32` (E9 xx xx xx xx) and leaves every byte after
+// them untouched, so if the plain pattern finds nothing, look for exactly
+// that: E9 + 4 wildcards + the original pattern from byte 5 on.
 static bool ScanPattern(GameSignature& sig) {
     unsigned char bytes[128]; bool wild[128]; int len = 0;
     for (const char* c = sig.pattern; *c && len < 128; ) {
@@ -126,20 +165,14 @@ static bool ScanPattern(GameSignature& sig) {
         if (c[0] == '?') { wild[len] = true; bytes[len] = 0; len++; c += 2; continue; }
         unsigned int v = 0; sscanf_s(c, "%2x", &v); bytes[len] = (unsigned char)v; wild[len] = false; len++; c += 2;
     }
-    sig.matches = 0; sig.resolved = 0;
-    const unsigned char* p = (const unsigned char*)g_textStart;
-    const unsigned char* end = (const unsigned char*)g_textEnd - len;
-    for (; p <= end; p++) {
-        if (p[0] != bytes[0] && !wild[0]) continue;
-        int i = 1;
-        for (; i < len; i++) if (!wild[i] && p[i] != bytes[i]) break;
-        if (i == len) {
-            sig.matches++;
-            if (sig.matches == 1) sig.resolved = (uintptr_t)p;
-            if (sig.matches > 1) break;
-        }
-    }
-    return sig.matches == 1;
+    sig.alreadyHooked = false;
+    if (ScanBytes(bytes, wild, len, sig)) return true;
+    if (sig.matches != 0 || len < 12) return false;
+    bytes[0] = 0xE9; wild[0] = false;
+    for (int i = 1; i < 5; i++) wild[i] = true;
+    if (!ScanBytes(bytes, wild, len, sig)) return false;
+    sig.alreadyHooked = true;
+    return true;
 }
 
 static bool ResolveGameAddresses() {
@@ -151,12 +184,6 @@ static bool ResolveGameAddresses() {
     if (nt->Signature != IMAGE_NT_SIGNATURE) { snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "no PE header"); return false; }
     g_exeTimeStamp = nt->FileHeader.TimeDateStamp;
     g_exeImageSize = nt->OptionalHeader.SizeOfImage;
-    // The SDK's own store detection (ACT_EXE) reads a fixed address and its
-    // Steam hooks assume the usual base; both known builds satisfy this.
-    if (g_exeBase != 0x140000000ull || g_exeImageSize < 0x01AA8000u) {
-        snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "unexpected module layout (base %p, image size 0x%08X)", (void*)g_exeBase, g_exeImageSize);
-        return false;
-    }
     const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
     for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
         if (memcmp(sec->Name, ".text", 5) == 0) {
@@ -192,6 +219,46 @@ static bool ResolveGameAddresses() {
     return true;
 }
 
+// ------------------------------------------------------------- startup --
+// Test switch: MADMAX_MODS_DEFER=1 in the environment, or a file
+// scriptsorce_steam_path.txt, forces the deferred (Steam) startup path on a
+// build whose code is readable at load time.
+static bool ForceDefer() {
+    char v[8];
+    if (GetEnvironmentVariableA("MADMAX_MODS_DEFER", v, sizeof(v)) > 0 && v[0] == '1') return true;
+    char path[MAX_PATH];                             // or a marker file: <game>\scriptsorce_steam_path.txt
+    GetModuleFileNameA(NULL, path, MAX_PATH);
+    char* slash = strrchr(path, '\\'); if (slash) slash[1] = 0;
+    strcat_s(path, "scripts\\force_steam_path.txt");
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+}
+
+static void InstallMod(HMODULE hModule);
+static HMODULE g_attachModule = nullptr;
+static volatile LONG g_installed = 0;
+typedef void (WINAPI* GetStartupInfoWFn)(LPSTARTUPINFOW info, uintptr_t chain);
+static GetStartupInfoWFn GetStartupInfoW_orig = nullptr;
+
+// Not one signature matched: the code is not readable yet (Steam's DRM keeps
+// it encrypted until the game starts), as opposed to a build that differs.
+static bool NoSignatureMatched() {
+    for (int i = 0; i < SIG_COUNT; i++) if (g_sigs[i].matches) return false;
+    return true;
+}
+
+// The second argument is not part of GetStartupInfoW; mm_sdk-based plugins
+// pass a marker through it to each other, so it is forwarded untouched.
+static void WINAPI GetStartupInfoW_hook(LPSTARTUPINFOW info, uintptr_t chain) {
+    GetStartupInfoW_orig(info, chain);
+    if (g_installed) return;
+    g_gameVersionOk = ResolveGameAddresses();
+    if (!g_gameVersionOk && NoSignatureMatched()) return;   // still encrypted, wait for the next call
+    if (InterlockedExchange(&g_installed, 1) == 0) {
+        LogLine("game code ready (C runtime startup), installing");
+        InstallMod(g_attachModule);
+    }
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 {
     if (dwReason == DLL_PROCESS_DETACH) {
@@ -203,12 +270,34 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
         InitModPaths(hModule);
         LogSessionStart();
         DetectConvoyMapPoints();
+        MH_Initialize();
         g_gameVersionOk = ResolveGameAddresses();
         LogLine("session start, build %s", MM_BUILD_TAG);
+        if ((!g_gameVersionOk && NoSignatureMatched()) || ForceDefer()) {
+            // Steam: the executable is wrapped by Steam's DRM and its code is
+            // still encrypted while plugins load, so nothing can match yet. The
+            // game's C runtime startup calls GetStartupInfoW once the real code
+            // runs; resolve and install from there (what mm_sdk's
+            // HookMgr::Initialize does on Steam, minus its hard-coded address).
+            LPVOID gsi = (LPVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetStartupInfoW");
+            MH_STATUS c = gsi ? MH_CreateHook(gsi, (LPVOID)GetStartupInfoW_hook, (LPVOID*)&GetStartupInfoW_orig) : MH_ERROR_FUNCTION_NOT_FOUND;
+            MH_STATUS e = (c == MH_OK) ? MH_EnableHook(gsi) : c;
+            LogLine("game code not readable yet (Steam DRM?), installing at game startup: %s", MH_StatusToString(e));
+            g_attachModule = hModule;
+            return TRUE;
+        }
+        InstallMod(hModule);
+    }
+    return TRUE;
+}
+
+static void InstallMod(HMODULE hModule) {
+    {
         LogLine("game version check: %s", g_gameVersionStatus);
         LogLine("convoy formation map: %s", g_convoyMapStatus);
         for (int i = 0; i < SIG_COUNT; i++)
-            LogLine("  signature %-70s %s %p (matches %d)", g_sigs[i].name, g_sigs[i].matches == 1 ? "OK" : "--", (void*)g_sigs[i].resolved, g_sigs[i].matches);
+            LogLine("  signature %-70s %s %p (matches %d)%s", g_sigs[i].name, g_sigs[i].matches == 1 ? "OK" : "--", (void*)g_sigs[i].resolved, g_sigs[i].matches,
+                g_sigs[i].alreadyHooked ? " -- already hooked by another mod, chaining behind it" : "");
         if (!g_gameVersionOk) {
             char msg[512];
             snprintf(msg, sizeof(msg),
@@ -217,12 +306,17 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
                 "The mod stays loaded but does nothing, so the game is safe to play. "
                 "Please report your game version (store + patch) to the mod author.", g_gameVersionStatus);
             MessageBoxA(NULL, msg, "Mad Max - Enhanced Convoys", MB_OK | MB_ICONWARNING);
-            return TRUE;
+            return;
         }
-        HookMgr::Initialize();
-        PluginAttach(hModule, dwReason, lpReserved);
+        // Not HookMgr::Initialize(): its Steam path defers installation from a
+        // hook whose trigger is a hard-coded return address. Everything this
+        // mod hooks is signature-resolved; on Steam the deferral is done above.
+        HookMgr::isGOG = HookMgr::IsKnownGogBuild();
+        HookMgr::isSteam = !HookMgr::isGOG;
+        LogLine("SDK build detection: %s", HookMgr::isGOG ? "known GOG build" : (HookMgr::SdkAddressesUsable() ? "not the known GOG build" : "unknown build (SDK addresses unusable)"));
+        PluginHooks();
+        PluginAttach(hModule, DLL_PROCESS_ATTACH, nullptr);
     }
-    return TRUE;
 }
 
 
@@ -530,16 +624,375 @@ static void InstallLoggedNodeHook(uintptr_t addr, LPVOID hook, LPVOID* orig, con
 // before the call) -- if SendMsg's internals expect that scratch space to
 // already be there rather than allocating their own, this could misbehave.
 // Test on save 4 only.
-typedef void (*SendEventMsgFn)(const char* msg);
-static SendEventMsgFn SendEventMsg = (SendEventMsgFn)0x140007ca0;
+SendEventMsgFn SendEventMsg = (SendEventMsgFn)0x140007ca0;
 
 bool f5Pressed = false;
+extern bool g_fastStormsOn;
+static void OnStormSpawned();
 int g_spawnStormCalls = 0;
 const char* g_spawnStormHookInstallStatus = "not attempted yet";
 int g_forceStormPresses = 0;
 
+// ---- Mod A: fast storms, using the game's own switch (2026-09-22) ----
+// Storms are rare by design, not by accident: graphs/open_world/
+// encounter_storm_generate_interval.gsrc picks the delay until the next storm
+// with SetRandomFloat. The node's own literals read 1800/3600, but its
+// variable pins are wired to VariableFloat 7200 and 9000 -- and the pins win,
+// so the real interval is 2 to 2.5 hours of play. That matches the SpawnStorm
+// instrumentation hook above, which logged zero natural storms in every test
+// session so far.
+//
+// The same script has a second path: if its input bool is true the interval
+// is a flat 60 seconds. Inside encounter_system.gsrc that bool is a local
+// variable (Node[355]) written by two SetVariable nodes, each fired by its
+// own Start node -- Node[311] writes 1.0, Node[294] writes 0.0. Start nodes
+// are exactly what CProcessor::FireStart(nameHash) triggers, so the toggle is
+// a pair of FireStart calls on the object that runs that graph: the
+// CGraphScriptGameObject "gsr.encounter_system" from global/global.blo,
+// objectid 4252045013. No file is modified and it is reversible in place.
+//
+// UNVERIFIED: whether the new interval applies to the storm already being
+// timed or only to the next one scheduled after the toggle (the script runs
+// when the previous interval expires), and whether 60 s storms upset anything
+// that assumes they are rare. Test on save 4 only.
+static void* FindGameObjectByIdAndRelease(uint64_t id);   // defined with the respawn sweep below
+typedef bool (*FireStartFn)(void* processor, unsigned int startNameHash);
+static FireStartFn ProcessorFireStart = nullptr;   // from g_sigs[SIG_FIRESTART]
+
+const uint64_t ENCOUNTER_SYSTEM_OBJECT_ID = 4252045013ull;                  // gsr.encounter_system in global.blo
+const unsigned int ENCOUNTER_SYSTEM_PATH_HASH = 0x99BD2CEAu;                // Jenkins("graphs/open_world/encounter_system.gsrc")
+// The decoded graph prints these Name fields as signed decimals
+// (-2005534086 and 1857822523); converting them by hand the first time gave
+// two wrong constants and FireStart simply found no such Start node.
+const unsigned int STORM_START_FAST = 0x8875FA7Au;                          // Start Node[311], Name -2005534086 -> flag = 1 -> 60 s interval
+const unsigned int STORM_START_NORMAL = 0x6EBC1F3Bu;                        // Start Node[294], Name  1857822523 -> flag = 0 -> 7200-9000 s
+// Setting the flag alone changes nothing that is already running: the storm
+// is fired by a Timer node (Node[325]) whose "done" output goes straight to
+// SpawnStorm, and a Timer only samples its time pin when it is started or
+// restarted. Three live pulses in a row timed out for exactly this reason --
+// the interval variable was updated while the old 2-hour countdown kept
+// running. Start Node[291] is the cycle entry the game itself uses: through
+// OrderedExecute Node[198] it calls the interval script AND then reaches
+// Node[203], which fires the Timer's "restart" pin. So each pulse now sets
+// the flag first and immediately restarts the cycle.
+const unsigned int STORM_START_RESTART_CYCLE = 0x4121B2DAu;                 // Start Node[291], Name 1092727514
+
+// Storm cadence presets.
+//
+// First attempt drove the game's own scheduler: encounter_system.gsrc keeps a
+// flag that switches the interval between 60 s and 7200-9000 s, and Start
+// Node[291] recomputes the interval and restarts the timer. Both Starts were
+// accepted every time, yet five pulses across two sessions produced no storm.
+// Reading the graph again explains it: the storm is fired by Timer Node[325],
+// which is authored with paused = true and is un-paused by a pin fed from
+// four separate conditions (InStormArea "no", IsCharacterInSequence,
+// a CompareVariable, and a WaitForEnvironmentTagCallback). Restarting a timer
+// that the environment keeps parked achieves nothing.
+//
+// So the cadence is now driven the short way: NEvent::CSendEvent::SendMsg
+// with the engine's own "storm.trigger" command -- the same entry point the
+// Cheat Engine table uses, verified in game to raise a storm immediately and
+// without side effects. The game's own 2-hour cycle is left completely
+// untouched underneath; this only adds storms on top of it.
+enum StormPreset { STORM_OFF = 0, STORM_FREQUENT, STORM_UNCOMMON, STORM_RANDOM, STORM_PRESET_COUNT };
+struct StormPresetInfo { const char* name; float minSeconds; float maxSeconds; };
+// Gaps are measured from the END of one storm (the weather really clearing,
+// read from the weather manager below) to the next trigger, counted only in
+// game time and only while the sky is clear.
+static const StormPresetInfo g_stormPresets[STORM_PRESET_COUNT] = {
+    { "off (vanilla only)",                        0.0f,    0.0f },
+    { "frequent (4-9 min between storms)",       240.0f,  540.0f },
+    { "uncommon (10-30 min between storms)",     600.0f, 1800.0f },
+    { "random (0-60 min, can be back to back)",    0.0f, 3600.0f },
+};
+// Fallback only, for when the weather signal is unavailable: measured
+// 2026-09-23, a storm reaches a waiting player ~40 s after the trigger, stays
+// at full strength 300 s and fades out in 30 s.
+const float STORM_MEASURED_TOTAL_S = 370.0f;
+// A trigger whose storm has not reached the player after this long is counted
+// as missed (outrun, or the player is somewhere storms cannot happen). The
+// next one is then scheduled normally -- never re-fired at once, so storm
+// fronts do not pile up out on the map.
+const float STORM_ARRIVAL_TIMEOUT_S = 120.0f;
+
+int g_stormPreset = STORM_OFF;
+float g_stormNextDelay = 0.0f;
+int g_stormTriggers = 0, g_stormArrived = 0, g_stormMissed = 0;
+char g_stormToggleStatus[200] = "not started";
+bool f11Pressed = false;
+bool g_fastStormsOn = false;   // kept only so the SpawnStorm log line can say who asked
+
+static float RollStormDelay() {
+    const StormPresetInfo& p = g_stormPresets[g_stormPreset];
+    float t = (float)rand() / (float)RAND_MAX;
+    return p.minSeconds + t * (p.maxSeconds - p.minSeconds);
+}
+
+// ---- The weather signal (2026-09-23, confirmed live) ----
+// CEnvironmentPresetTimeOfDayManager keeps the active storm-class preset at
+//     int   index  = *(int*)(mgr + 0x270)        (-1 = none)
+//     state = mgr + 0x278 + index * 0x48         (SSandstormState)
+// and the state's +0x3C is the preset's weather id, from
+// global/environment_presets.blo:
+//     -1 Sandstorm, -2 ThunderStorm      real storms (CStormConfig defines
+//                                        Sandstorm, Thunderstorm, Infinitestorm)
+//     -3 SulfurStorm, -4 Gastown         local area atmospheres (sulfur pits,
+//                                        Gastown) holding the same slot; a
+//                                        storm cannot start while they are on
+// Live test: near Gastown the -4 preset was on and F11 produced nothing;
+// waiting in the open, the index switched to the Sandstorm 39 s after F11,
+// stayed 300 s, faded 30 s; driving away, it never changed at all.
+// The manager comes from its own per-frame InternalUpdateRender (GOG, exact
+// `this`) or, failing that, from the object lookup: FindOptional on objectid
+// 4080819380 returns the manager + 0x10 (live: ...360 vs ...350, a secondary
+// base), accepted only if the index reads as a sane -1..7.
+extern CVector3f g_PlayerPos;   // defined with the overlay below
+const uint64_t TIME_OF_DAY_MANAGER_OBJECT_ID = 4080819380ull;
+const int STORM_STATE_BASE = 0x278, STORM_STATE_STRIDE = 0x48, STORM_INDEX_OFF = 0x270, STORM_SLOTS = 8;
+
+void* volatile g_timeOfDayMgr = nullptr;
+char g_todHookStatus[64] = "not installed";
+DEFHOOK(void, TodInternalUpdateRender, (void* self, float dt)) {
+    g_timeOfDayMgr = self;
+    TodInternalUpdateRender_orig(self, dt);
+}
+
+enum WeatherKind { WEATHER_UNKNOWN = 0, WEATHER_CLEAR, WEATHER_STORM, WEATHER_LOCAL };
+struct WeatherReading { bool ok; int index; int weatherId; float fadeIn, fadeOut, timer; int flags; };
+static WeatherReading g_weather = { false, -1, 0, 0.0f, 0.0f, 0.0f, 0 };
+static WeatherKind g_weatherKind = WEATHER_UNKNOWN;
+static float g_weatherClock = 0.0f, g_gameTime = 0.0f, g_stormStartedAt = -1.0f;
+char g_stormProbeStatus[200] = "weather: waiting for the manager";
+
+static const char* WeatherName(int id) {
+    switch (id) {
+    case -1: return "Sandstorm";
+    case -2: return "ThunderStorm";
+    case -3: return "SulfurStorm (local)";
+    case -4: return "Gastown (local)";
+    }
+    return "unknown";
+}
+
+static bool ReadWeather(void* mgr, WeatherReading* out) {
+    __try {
+        int idx = *(int*)((uintptr_t)mgr + STORM_INDEX_OFF);
+        if (idx < -1 || idx >= STORM_SLOTS) return false;
+        out->index = idx; out->weatherId = 0; out->fadeIn = out->fadeOut = out->timer = 0.0f; out->flags = 0;
+        if (idx >= 0) {
+            uintptr_t st = (uintptr_t)mgr + STORM_STATE_BASE + idx * STORM_STATE_STRIDE;
+            out->fadeIn = *(float*)(st + 0x30); out->fadeOut = *(float*)(st + 0x34); out->timer = *(float*)(st + 0x38);
+            out->weatherId = *(int*)(st + 0x3C); out->flags = *(uint8_t*)(st + 0x40);
+        }
+        out->ok = true;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static void* FindWeatherManager() {
+    if (g_timeOfDayMgr) return g_timeOfDayMgr;
+    if (!CGameObject_FindOptional) return nullptr;
+    void* byId = FindGameObjectByIdAndRelease(TIME_OF_DAY_MANAGER_OBJECT_ID);
+    return byId ? (void*)((uintptr_t)byId - 0x10) : nullptr;
+}
+
+static void OnWeatherChanged(const WeatherReading& prev, WeatherKind prevKind, const WeatherReading& now, WeatherKind kind) {
+    if (kind == WEATHER_STORM && prevKind != WEATHER_STORM) {
+        g_stormStartedAt = g_gameTime;
+        LogLine("STORM ARRIVED: %s (index %d) | player %.0f %.0f %.0f", WeatherName(now.weatherId), now.index, g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z);
+    } else if (prevKind == WEATHER_STORM && kind != WEATHER_STORM) {
+        LogLine("STORM ENDED: %s after %.0f s | player %.0f %.0f %.0f", WeatherName(prev.weatherId),
+            g_stormStartedAt >= 0.0f ? g_gameTime - g_stormStartedAt : -1.0f, g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z);
+        g_stormStartedAt = -1.0f;
+    }
+    if (kind == WEATHER_LOCAL && prevKind != WEATHER_LOCAL)
+        LogLine("WEATHER: entered local atmosphere %s -- storms cannot start here | player %.0f %.0f %.0f", WeatherName(now.weatherId), g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z);
+    else if (prevKind == WEATHER_LOCAL && kind != WEATHER_LOCAL)
+        LogLine("WEATHER: left local atmosphere %s | player %.0f %.0f %.0f", WeatherName(prev.weatherId), g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z);
+}
+
+static void WeatherTick(float dt) {
+    g_gameTime += dt;
+    g_weatherClock += dt;
+    if (g_weatherClock < 1.0f) return;
+    g_weatherClock = 0.0f;
+    void* mgr = FindWeatherManager();
+    WeatherReading r = { false, -1, 0, 0.0f, 0.0f, 0.0f, 0 };
+    if (!mgr || !ReadWeather(mgr, &r)) {
+        if (g_weather.ok) LogLine("WEATHER: signal lost");
+        g_weather.ok = false; g_weatherKind = WEATHER_UNKNOWN;
+        snprintf(g_stormProbeStatus, sizeof(g_stormProbeStatus), "weather: no signal (render hook %s)", g_todHookStatus);
+        return;
+    }
+    WeatherKind kind = r.index < 0 ? WEATHER_CLEAR : (r.weatherId == -1 || r.weatherId == -2) ? WEATHER_STORM : WEATHER_LOCAL;
+    if (!g_weather.ok) {
+        LogLine("WEATHER: signal acquired (%s), index %d id %d", g_timeOfDayMgr ? "render hook" : "object lookup - 0x10", r.index, r.weatherId);
+        if (kind == WEATHER_STORM) g_stormStartedAt = g_gameTime;
+    } else if (kind != g_weatherKind || r.index != g_weather.index) {
+        OnWeatherChanged(g_weather, g_weatherKind, r, kind);
+    }
+    g_weather = r; g_weatherKind = kind;
+    snprintf(g_stormProbeStatus, sizeof(g_stormProbeStatus), "weather: %s (index %d, id %d, timer %.1f)",
+        kind == WEATHER_CLEAR ? "clear" : WeatherName(r.weatherId), r.index, r.weatherId, r.timer);
+}
+
+// ---- Scheduler ----
+enum StormSchedState { SCHED_GAP = 0, SCHED_AWAITING_ARRIVAL, SCHED_IN_STORM };
+static StormSchedState g_schedState = SCHED_GAP;
+static float g_awaitingFor = 0.0f;
+
+static void TriggerStormNow(const char* why) {
+    if (!SendEventMsg) return;
+    g_stormTriggers++;
+    g_fastStormsOn = true;
+    SendEventMsg("storm.trigger");
+    LogLine("STORM: storm.trigger sent (%s, #%d) | player %.0f %.0f %.0f", why, g_stormTriggers, g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z);
+}
+
+// Called from the SpawnStorm hook (which has never fired so far).
+static void OnStormSpawned() { g_fastStormsOn = false; }
+
+static void StartGap(const char* why) {
+    g_schedState = SCHED_GAP;
+    g_stormNextDelay = RollStormDelay();
+    snprintf(g_stormToggleStatus, sizeof(g_stormToggleStatus), "%s; next storm after %.0f s of clear sky", why, g_stormNextDelay);
+    LogLine("STORM: %s", g_stormToggleStatus);
+}
+
+static void StormPresetTick(float dt) {
+    if (g_stormPreset == STORM_OFF) return;
+    bool haveSignal = g_weather.ok;
+    bool storm = haveSignal && g_weatherKind == WEATHER_STORM;
+    bool local = haveSignal && g_weatherKind == WEATHER_LOCAL;
+
+    if (!haveSignal) {
+        // No weather signal: previous behaviour, a plain timer that assumes
+        // the measured storm length.
+        g_stormNextDelay -= dt;
+        if (g_stormNextDelay > 0.0f) return;
+        TriggerStormNow(g_stormPresets[g_stormPreset].name);
+        g_stormNextDelay = RollStormDelay() + STORM_MEASURED_TOTAL_S;
+        snprintf(g_stormToggleStatus, sizeof(g_stormToggleStatus), "no weather signal -- timed mode; next in %.0f s", g_stormNextDelay);
+        return;
+    }
+
+    switch (g_schedState) {
+    case SCHED_GAP:
+        if (storm) {   // a late arrival of ours, or the game's own storm
+            g_schedState = SCHED_IN_STORM;
+            snprintf(g_stormToggleStatus, sizeof(g_stormToggleStatus), "storm in progress (the game's own or a late arrival)");
+            LogLine("STORM: a storm is on while waiting for the next one; the gap restarts when it ends");
+            return;
+        }
+        if (local) {
+            snprintf(g_stormToggleStatus, sizeof(g_stormToggleStatus), "paused: inside %s; %.0f s left", WeatherName(g_weather.weatherId), g_stormNextDelay);
+            return;
+        }
+        g_stormNextDelay -= dt;
+        if (g_stormNextDelay > 0.0f) {
+            snprintf(g_stormToggleStatus, sizeof(g_stormToggleStatus), "clear sky; next storm in %.0f s", g_stormNextDelay);
+            return;
+        }
+        TriggerStormNow(g_stormPresets[g_stormPreset].name);
+        g_schedState = SCHED_AWAITING_ARRIVAL;
+        g_awaitingFor = 0.0f;
+        snprintf(g_stormToggleStatus, sizeof(g_stormToggleStatus), "storm triggered, waiting for it to reach you");
+        return;
+
+    case SCHED_AWAITING_ARRIVAL:
+        if (storm) {
+            g_stormArrived++;
+            g_schedState = SCHED_IN_STORM;
+            LogLine("STORM: triggered storm #%d reached the player after %.0f s", g_stormTriggers, g_awaitingFor);
+            snprintf(g_stormToggleStatus, sizeof(g_stormToggleStatus), "storm in progress");
+            return;
+        }
+        g_awaitingFor += dt;
+        if (g_awaitingFor >= STORM_ARRIVAL_TIMEOUT_S) {
+            g_stormMissed++;
+            char why[140];
+            snprintf(why, sizeof(why), "storm #%d never reached the player in %.0f s (%s)", g_stormTriggers, STORM_ARRIVAL_TIMEOUT_S,
+                local ? "inside a local atmosphere" : "outrun, or a no-storm area");
+            StartGap(why);
+        }
+        return;
+
+    case SCHED_IN_STORM:
+        if (storm) return;
+        StartGap("storm over");
+        return;
+    }
+}
+
+static void CycleStormPreset() {
+    g_stormPreset = (g_stormPreset + 1) % STORM_PRESET_COUNT;
+    if (g_stormPreset == STORM_OFF) {
+        snprintf(g_stormToggleStatus, sizeof(g_stormToggleStatus), "off; the game's own cadence is untouched");
+        LogLine("STORM: %s", g_stormToggleStatus);
+        return;
+    }
+    char why[140];
+    snprintf(why, sizeof(why), "preset %s", g_stormPresets[g_stormPreset].name);
+    if (g_weather.ok && g_weatherKind == WEATHER_STORM) {
+        g_schedState = SCHED_IN_STORM;
+        snprintf(g_stormToggleStatus, sizeof(g_stormToggleStatus), "%s; a storm is on, the gap starts when it ends", why);
+        LogLine("STORM: %s", g_stormToggleStatus);
+    } else {
+        StartGap(why);
+    }
+}
+
+// ---- Storm observation hooks (2026-09-22) ----
+// The SpawnStorm node hook has never logged a single line, not even in the
+// session where a storm demonstrably happened, so it is not on the path the
+// game actually takes. These two are: CStormConfig::FindStormDefinition is
+// how a storm is resolved by name before it starts, and NGSONodes::InStormArea
+// is what the graphs ask to know whether the player is inside one. Together
+// they answer the open question -- does "storm.trigger" really create a
+// storm, and how long does it take to arrive? Both are read-only.
+int g_findStormDefCalls = 0;
+int g_inStormAreaTrue = 0;
+bool g_wasInStorm = false;
+
+// The real signal. Neither SpawnStorm nor FindStormDefinition ever fired,
+// not even while a storm raised by "storm.trigger" was visibly on screen, so
+// the command works through the weather system rather than by spawning a
+// storm object. NEnvironmentPreset::CEnvironmentPresetManager::SetCurrentWeatherId
+// (0x1401CCD80) is where a weather change actually lands; logging its
+// argument gives a timestamped record of every storm starting and ending.
+DEFHOOK(void, SetCurrentWeatherId, (void* mgr, int weatherId)) {
+    static int last = -12345;
+    if (weatherId != last) {
+        last = weatherId;
+        LogLine("WEATHER: id -> %d", weatherId);
+    }
+    SetCurrentWeatherId_orig(mgr, weatherId);
+}
+
+DEFHOOK(void*, FindStormDefinition, (void* stormConfig, unsigned int nameHash)) {
+    void* def = FindStormDefinition_orig(stormConfig, nameHash);
+    g_findStormDefCalls++;
+    if (g_findStormDefCalls <= 40)
+        LogLine("STORM: FindStormDefinition(%u) -> %s (#%d)", nameHash, def ? "found" : "NOT found", g_findStormDefCalls);
+    return def;
+}
+
+DEFHOOK(uint32_t, InStormArea, (void* processor, const void* node, unsigned int pin)) {
+    uint32_t r = InStormArea_orig(processor, node, pin);
+    // The node reports through its pins, so infer from how often it is asked:
+    // log only the transitions, driven by the graph's own answer frequency.
+    g_inStormAreaTrue++;
+    if (g_inStormAreaTrue == 1) LogLine("STORM: InStormArea node started being evaluated");
+    return r;
+}
+
 DEFHOOK(uint32_t, SpawnStorm, (void* processor, const void* node, unsigned int pin)) {
     g_spawnStormCalls++;
+    // Logged, not just counted: the overlay counter is useless once the game
+    // is closed, and whether storms actually start is the whole question the
+    // fast-storm toggle is meant to answer.
+    LogLine("STORM spawned (SpawnStorm call #%d)%s", g_spawnStormCalls, g_fastStormsOn ? " [asked for by the preset]" : " [the game's own schedule]");
+    OnStormSpawned();
     return SpawnStorm_orig(processor, node, pin);
 }
 
@@ -669,7 +1122,7 @@ void ResetAllKnownConvoys() {
     g_resetConvoysLastSkippedSanity = skipped;
 }
 
-static CVector3f g_PlayerPos(0.f, 0.f, 0.f);
+CVector3f g_PlayerPos(0.f, 0.f, 0.f);
 
 // ---- Convoy composition: resolver plumbing (release, 2026-09-22) ----
 // Addresses come from the signature table; see the composition patch below.
@@ -1244,6 +1697,30 @@ static void ConvoyRespawnTick(float dt) {
 // F3 expands it into the full diagnostic view for troubleshooting reports.
 class ConvoyModOverlay : public ImGuiRenderer {
 	void Render() override {
+#if MM_DEV_TOOLS
+		// Dev builds (2026-09-24): Enhanced Convoys and Wasteland Storms are
+		// released, so their status lines are gone from our own overlay -- only
+		// what is still being worked on stays. The release overlay below is
+		// what a MM_DEV_TOOLS 0 build shows.
+		ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_Always);
+		ImGui::Begin("Mad Max dev tools", nullptr,
+			ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+			ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+		ImGui::Text("Dev build: %s", MM_BUILD_TAG);
+		ImGui::Text("Pos: X=%.1f Y=%.1f Z=%.1f", g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z);
+		ImGui::Text("Invincibility (F1): %s", enabledInvincibility ? "ON" : "off");
+		ImGui::Text("Vehicle: %s", (g_lastCurrentVehicle && g_lastCurrentVehicle == g_lastSignatureVehicle) ? "Magnum Opus" :
+			(g_lastCurrentVehicle ? "another car" : "on foot"));
+		if (g_showDiagnostics) {
+			ImGui::Separator();
+			ImGui::Text("Current vehicle: %p  |  Magnum Opus: %p  |  chassis: %p", g_lastCurrentVehicle, g_lastSignatureVehicle, g_lastChassis);
+			ImGui::Text("F6: set current vehicle mass to %.0f (pressed %d)", g_testVehicleMass, g_setMassPresses);
+			ImGui::Text("F7: set current vehicle engine torque scale to %.1fx (pressed %d)", g_testTorqueScale, g_setTorquePresses);
+		}
+		ImGui::Text("F3: %s details", g_showDiagnostics ? "hide" : "show");
+		ImGui::End();
+		return;
+#endif
 		ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_Always);
 		ImGui::Begin("Convoy Respawn Mod", nullptr,
 			ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
@@ -1293,7 +1770,12 @@ class ConvoyModOverlay : public ImGuiRenderer {
 			ImGui::Text("Invincibility (F1): %s", enabledInvincibility ? "ON" : "off");
 			ImGui::Text("SpawnStorm hook install: %s", g_spawnStormHookInstallStatus);
 			ImGui::Text("  SpawnStorm calls (natural, not caused by us): %d", g_spawnStormCalls);
-			ImGui::Text("Force storm.trigger (F5): pressed %d time(s)", g_forceStormPresses);
+			ImGui::Text("Storms (F5 cycles): %s", g_stormPresets[g_stormPreset].name);
+			if (g_stormPreset != STORM_OFF)
+				ImGui::Text("   triggered %d  |  reached you %d  |  missed %d", g_stormTriggers, g_stormArrived, g_stormMissed);
+			ImGui::Text("   %s", g_stormToggleStatus);
+			ImGui::Text("Force one storm now, storm.trigger (F11): pressed %d time(s)", g_forceStormPresses);
+			ImGui::Text("%s", g_stormProbeStatus);
 			ImGui::Text("Current vehicle: %p  |  Signature vehicle: %p  |  %s", g_lastCurrentVehicle, g_lastSignatureVehicle,
 				(g_lastCurrentVehicle && g_lastCurrentVehicle == g_lastSignatureVehicle) ? "SAME (driving own car)" :
 				(g_lastCurrentVehicle ? "DIFFERENT (driving a captured/other car!)" : "no vehicle"));
@@ -1323,7 +1805,10 @@ DEFHOOK(void, CPlayer__UpdateController, (void* thiz, float dt)) {
 
 	if (ch) {
 		CMatrix4f posMat;
-		CVehicle* posVeh = ch->GetVehiclePtr();
+		// GetVehiclePtr comes from the signature table, not from the SDK's
+		// hard-coded pair, so the distance gate also works on builds the SDK
+		// does not know. GetTransform is virtual, so it needs no address.
+		CVehicle* posVeh = CharacterGetVehiclePtr ? (CVehicle*)CharacterGetVehiclePtr(ch) : nullptr;
 		if (posVeh) posVeh->GetTransform(&posMat);
 		else ch->GetTransform(&posMat);
 		g_PlayerPos = posMat.Position();
@@ -1334,6 +1819,10 @@ DEFHOOK(void, CPlayer__UpdateController, (void* thiz, float dt)) {
 	}
 
 	ConvoyRespawnTick(dt);
+#if MM_DEV_TOOLS && MM_STORM_TOOLS
+	WeatherTick(dt);
+	StormPresetTick(dt);
+#endif
 
     static CVector3f savePos;
 
@@ -1406,11 +1895,10 @@ DEFHOOK(void, CPlayer__UpdateController, (void* thiz, float dt)) {
         f2Pressed = false;
     }
 
-    if (GetAsyncKeyState(VK_F5) & 0x8000) {
+    if (MM_STORM_TOOLS && (GetAsyncKeyState(VK_F5) & 0x8000)) {
         if (!f5Pressed) {
             f5Pressed = true;
-            g_forceStormPresses++;
-            SendEventMsg("storm.trigger");
+            CycleStormPreset();
         }
     }
     else {
@@ -1448,6 +1936,17 @@ DEFHOOK(void, CPlayer__UpdateController, (void* thiz, float dt)) {
     }
     else {
         f7Pressed = false;
+    }
+
+    if (MM_STORM_TOOLS && (GetAsyncKeyState(VK_F11) & 0x8000)) {
+        if (!f11Pressed) {
+            f11Pressed = true;
+            g_forceStormPresses++;
+            TriggerStormNow("manual F11");
+        }
+    }
+    else {
+        f11Pressed = false;
     }
 
     if (GetAsyncKeyState(VK_F10) & 0x8000) {
@@ -1563,9 +2062,19 @@ DEFHOOK(void, CPlayer__UpdateController, (void* thiz, float dt)) {
 }
 
 void PluginHooks() {
-	ImGuiRenderer::Install();
+	CGameObject_FindOptional = (FindOptionalFn)g_sigs[SIG_FINDOPTIONAL].resolved;
+	if (g_sigs[SIG_GETVEHICLEPTR].matches == 1) CharacterGetVehiclePtr = (CharacterGetVehicleFn)g_sigs[SIG_GETVEHICLEPTR].resolved;
+#if MM_DEV_TOOLS
+	if (g_sigs[SIG_FIRESTART].matches == 1) ProcessorFireStart = (FireStartFn)g_sigs[SIG_FIRESTART].resolved;
+#endif
 
-    CGameObject_FindOptional = (FindOptionalFn)g_sigs[SIG_FINDOPTIONAL].resolved;
+	// The overlay lives in the vendored SDK, which still addresses the render
+	// hooks by hard-coded address for two known builds. On anything else it is
+	// skipped: the mod itself keeps working, it just has no status box.
+	g_overlayAvailable = HookMgr::SdkAddressesUsable();
+	if (g_overlayAvailable) ImGuiRenderer::Install();
+	LogLine("overlay: %s", g_overlayAvailable ? "installed" : "skipped (unknown build; mod still active, diagnostics only in this log)");
+
     HookMgr::Install(g_sigs[SIG_UPDATECONTROLLER].resolved, CPlayer__UpdateController_hook, CPlayer__UpdateController_orig);
 
     // Addresses from AVAMain_F.pdb, verified 2026-09-15 by parsing the user's
@@ -1631,5 +2140,15 @@ void PluginHooks() {
             g_spawnStormHookInstallStatus = MH_StatusToString(createStatus);
         }
     }
+    // Weather manager render hook for the storm probe (fixed GOG address).
+    if (MM_STORM_TOOLS && HookMgr::isGOG) {
+        LPVOID target = (LPVOID)0x140205650;
+        MH_STATUS c = MH_CreateHook(target, (LPVOID)TodInternalUpdateRender_hook, (LPVOID*)&TodInternalUpdateRender_orig);
+        MH_STATUS e = (c == MH_OK) ? MH_EnableHook(target) : c;
+        snprintf(g_todHookStatus, sizeof(g_todHookStatus), "%s", MH_StatusToString(e));
+    } else {
+        snprintf(g_todHookStatus, sizeof(g_todHookStatus), "skipped (not the GOG build)");
+    }
+    LogLine("STORMPROBE: weather manager render hook: %s", g_todHookStatus);
 #endif // MM_DEV_TOOLS
 }

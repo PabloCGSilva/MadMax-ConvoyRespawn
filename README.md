@@ -4,9 +4,11 @@ Makes destroyed convoys in Mad Max (2015, PC) come back — in the same play
 session, driven by the game's own logic, without touching the wreck, the
 hood ornament or the region Threat.
 
-**Status: public beta (v0.9.0-beta1).** Only the non-Steam (GOG) build of
-`AVAMain.exe` dated 2015-12-07 is supported; the mod verifies the executable
-at startup and disables itself on anything else.
+**Status: public beta (v0.9.2-beta3).** Made and tested on the GOG build of
+`AVAMain.exe` (2015-12-07). The game functions are found by byte signature,
+and since beta3 the mod waits for Steam's DRM to decrypt the executable before
+looking, so the Steam version should work too (not confirmed yet). If anything
+can't be found, the mod disables itself and says so.
 
 ➡ **Players: grab the zip from the [Releases](../../releases) page.** The
 README inside explains installation, how it works, the F3/F4 keys and how to
