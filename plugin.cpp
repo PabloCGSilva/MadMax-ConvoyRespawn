@@ -28,6 +28,11 @@
 // Set to 1 for our own testing; a distributed build must ship with 0.
 #define MM_DEV_TOOLS 0
 
+// World repopulation (2026-10-14..16): liberated camps, scavenging locations and sniper towers get their enemies back after a
+// cooldown, and road encounters ignore the region's threat level (camp_repop.inc, threat_diag.inc). Uses fixed addresses of the
+// GOG build, so it switches itself off on any other executable. Can ship without MM_DEV_TOOLS (no keys, no overlay lines).
+#define MM_WORLD_REPOP 1
+
 // Storm presets moved to their own plugin, Wasteland Storms (WastelandStorms.asi,
 // 2026-09-23). Kept here, switched off, so both can be installed side by side
 // without two plugins answering F5/F11 and firing storms.
@@ -36,7 +41,7 @@
 // User-requested (2026-09-18): always show a visible tag for whatever
 // build is currently installed, so it's never ambiguous which test is
 // running. Bump this string every time a new test build goes out.
-#define MM_BUILD_TAG "v0.9.2-beta3 (2026-09-24)"
+#define MM_BUILD_TAG "v0.9.3-beta1 (2026-10-16)"
 
 // ---- Session event log (2026-09-21) ----
 // Replaces screenshot-driven debugging: every notable event (wreck seen,
@@ -221,16 +226,60 @@ static bool ResolveGameAddresses() {
 
 // ------------------------------------------------------------- startup --
 // Test switch: MADMAX_MODS_DEFER=1 in the environment, or a file
-// scriptsorce_steam_path.txt, forces the deferred (Steam) startup path on a
+// scripts\force_steam_path.txt, forces the deferred (Steam) startup path on a
 // build whose code is readable at load time.
+// A marker file whose text starts with "poll" also skips the GetStartupInfoW
+// trigger, to exercise the polling fallback alone.
+static bool g_forcePollOnly = false;
 static bool ForceDefer() {
     char v[8];
     if (GetEnvironmentVariableA("MADMAX_MODS_DEFER", v, sizeof(v)) > 0 && v[0] == '1') return true;
-    char path[MAX_PATH];                             // or a marker file: <game>\scriptsorce_steam_path.txt
+    char path[MAX_PATH];                             // or a marker file: <game>\scripts\force_steam_path.txt
     GetModuleFileNameA(NULL, path, MAX_PATH);
     char* slash = strrchr(path, '\\'); if (slash) slash[1] = 0;
     strcat_s(path, "scripts\\force_steam_path.txt");
-    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "r") != 0 || !f) return false;
+    char text[8] = { 0 };
+    fread(text, 1, 4, f); fclose(f);
+    g_forcePollOnly = strncmp(text, "poll", 4) == 0;
+    return true;
+}
+
+// Compiled code is full of int3 (CC) padding between functions; encrypted code
+// (Steam's DRM before the game starts) has almost none. Counts CC CC CC CC runs
+// in the first executable section.
+static int TextPaddingRuns() {
+    auto base = (const uint8_t*)GetModuleHandleA(nullptr);
+    auto nt = (const IMAGE_NT_HEADERS*)(base + ((const IMAGE_DOS_HEADER*)base)->e_lfanew);
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+        if (!(sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        const uint8_t* p = base + sec[i].VirtualAddress;
+        size_t n = sec[i].Misc.VirtualSize < 0x1000000 ? sec[i].Misc.VirtualSize : 0x1000000;
+        int runs = 0;
+        for (size_t k = 0; k + 4 <= n; k += 4)
+            if (*(const uint32_t*)(p + k) == 0xCCCCCCCCu) runs++;
+        return runs;
+    }
+    return -1;
+}
+
+// What kind of executable this is: Steam's DRM wraps the game in a ".bind"
+// section; a different build shows a different timestamp and size.
+static void LogExeInfo() {
+    auto base = (const uint8_t*)GetModuleHandleA(nullptr);
+    auto nt = (const IMAGE_NT_HEADERS*)(base + ((const IMAGE_DOS_HEADER*)base)->e_lfanew);
+    char sections[256] = { 0 };
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+        char name[9] = { 0 }; memcpy(name, sec[i].Name, 8);
+        char item[48]; snprintf(item, sizeof(item), "%s%s(%X)", i ? " " : "", name, (unsigned)sec[i].Misc.VirtualSize);
+        strcat_s(sections, item);
+    }
+    LogLine("executable: timestamp 0x%08X, image size 0x%X, entry +0x%X, sections: %s", (unsigned)nt->FileHeader.TimeDateStamp,
+        (unsigned)nt->OptionalHeader.SizeOfImage, (unsigned)nt->OptionalHeader.AddressOfEntryPoint, sections);
+    LogLine("code padding runs: %d (thousands = readable code; near 0 = still encrypted)", TextPaddingRuns());
 }
 
 static void InstallMod(HMODULE hModule);
@@ -248,21 +297,55 @@ static bool NoSignatureMatched() {
 
 // The second argument is not part of GetStartupInfoW; mm_sdk-based plugins
 // pass a marker through it to each other, so it is forwarded untouched.
-static void WINAPI GetStartupInfoW_hook(LPSTARTUPINFOW info, uintptr_t chain) {
-    GetStartupInfoW_orig(info, chain);
-    if (g_installed) return;
-    g_gameVersionOk = ResolveGameAddresses();
-    if (!g_gameVersionOk && NoSignatureMatched()) return;   // still encrypted, wait for the next call
-    if (InterlockedExchange(&g_installed, 1) == 0) {
-        LogLine("game code ready (C runtime startup), installing");
-        InstallMod(g_attachModule);
+// Both triggers below resolve and install at most once.
+static CRITICAL_SECTION g_installLock;
+static bool TryInstall(const char* how) {
+    EnterCriticalSection(&g_installLock);
+    bool done = g_installed != 0;
+    if (!done) {
+        g_gameVersionOk = ResolveGameAddresses();
+        if (g_gameVersionOk || !NoSignatureMatched()) {      // readable now (a build that differs still ends here)
+            g_installed = 1;
+            LogLine("game code ready (%s), installing", how);
+            InstallMod(g_attachModule);
+            done = true;
+        }
     }
+    LeaveCriticalSection(&g_installLock);
+    return done;
 }
 
+static void WINAPI GetStartupInfoW_hook(LPSTARTUPINFOW info, uintptr_t chain) {
+    GetStartupInfoW_orig(info, chain);
+    if (!g_installed) TryInstall("C runtime startup");
+}
+
+// Fallback for when GetStartupInfoW is never called after this plugin loads
+// (the plugin loader may come in after the game's C runtime startup): look
+// again every 250 ms for up to 3 minutes.
+static DWORD WINAPI WaitForGameCode(LPVOID) {
+    for (int i = 0; i < 720 && !g_installed; i++) {
+        Sleep(250);
+        if (TryInstall("found while waiting")) return 0;
+    }
+    if (!g_installed)
+        LogLine("code padding runs now: %d (thousands = the code is readable, so the functions really are not there)", TextPaddingRuns());
+    if (!g_installed)
+        LogLine("gave up after 3 minutes: none of the game functions were found. If the executable line above shows no .bind section, "
+                "this is a different game build than the ones supported -- please send this log to the mod author.");
+    return 0;
+}
+
+#if MM_DEV_TOOLS
+static void TdDump(const char* why);
+#endif
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 {
     if (dwReason == DLL_PROCESS_DETACH) {
         LogConvoySnapshot("game exit");
+#if MM_DEV_TOOLS
+        TdDump("game exit");
+#endif
         LogLine("session end");
         return TRUE;
     }
@@ -271,19 +354,27 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
         LogSessionStart();
         DetectConvoyMapPoints();
         MH_Initialize();
+        InitializeCriticalSection(&g_installLock);
+        bool defer = ForceDefer();
         g_gameVersionOk = ResolveGameAddresses();
         LogLine("session start, build %s", MM_BUILD_TAG);
-        if ((!g_gameVersionOk && NoSignatureMatched()) || ForceDefer()) {
+        LogExeInfo();
+        if ((!g_gameVersionOk && NoSignatureMatched()) || defer) {
             // Steam: the executable is wrapped by Steam's DRM and its code is
             // still encrypted while plugins load, so nothing can match yet. The
             // game's C runtime startup calls GetStartupInfoW once the real code
             // runs; resolve and install from there (what mm_sdk's
             // HookMgr::Initialize does on Steam, minus its hard-coded address).
-            LPVOID gsi = (LPVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetStartupInfoW");
-            MH_STATUS c = gsi ? MH_CreateHook(gsi, (LPVOID)GetStartupInfoW_hook, (LPVOID*)&GetStartupInfoW_orig) : MH_ERROR_FUNCTION_NOT_FOUND;
-            MH_STATUS e = (c == MH_OK) ? MH_EnableHook(gsi) : c;
-            LogLine("game code not readable yet (Steam DRM?), installing at game startup: %s", MH_StatusToString(e));
             g_attachModule = hModule;
+            MH_STATUS e = MH_ERROR_DISABLED;
+            if (!g_forcePollOnly) {
+                LPVOID gsi = (LPVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetStartupInfoW");
+                MH_STATUS c = gsi ? MH_CreateHook(gsi, (LPVOID)GetStartupInfoW_hook, (LPVOID*)&GetStartupInfoW_orig) : MH_ERROR_FUNCTION_NOT_FOUND;
+                e = (c == MH_OK) ? MH_EnableHook(gsi) : c;
+            }
+            LogLine("game code not readable yet (Steam DRM?), installing at game startup: %s; also checking again every 250 ms", MH_StatusToString(e));
+            HANDLE th = CreateThread(nullptr, 0, WaitForGameCode, nullptr, 0, nullptr);
+            if (th) CloseHandle(th);
             return TRUE;
         }
         InstallMod(hModule);
@@ -1553,6 +1644,7 @@ struct TrackedConvoy {
     int stateZeroSweeps;  // consecutive sweeps seen at state 0 with no processor
     bool prevWrecked, prevArmed, prevFound;
     int prevGraphState;
+    float wreckPos[3];    // CConvoyDataContainer::m_WreckedTransform translation, read every sweep (diagnostic)
 };
 static TrackedConvoy g_tracked[sizeof(g_convoyPairs) / sizeof(g_convoyPairs[0])] = {};
 static float g_sweepAccum = 0.0f;
@@ -1617,7 +1709,14 @@ static void ConvoyRespawnSweep(float elapsed, bool force) {
         if ((*flags & ~0x3) != 0) { t.armed = false; continue; } // not a sane EFlags byte, leave it alone
         t.wrecked = (*flags & 0x1) != 0;
         t.graphState = *(int*)((uintptr_t)graphObj + 0xE0);
-        if (!t.prevFound) { LogLine("convoy %2d: found (wrecked=%d, graph state %d)", i + 1, t.wrecked, t.graphState); t.prevFound = true; t.prevWrecked = t.wrecked; t.prevGraphState = t.graphState; }
+        // diagnostic (2026-10-12): a "hood ornament" map icon sat at the world origin with nothing there --
+        // log every convoy's stored wreck position so a zero one can be matched to it
+        const float* wreckMat = (const float*)((uintptr_t)container + 0xD8);
+        float wx = wreckMat[12], wy = wreckMat[13], wz = wreckMat[14];
+        if (t.prevFound && (wx != t.wreckPos[0] || wy != t.wreckPos[1] || wz != t.wreckPos[2]))
+            LogLine("convoy %2d: wreck pos %.1f %.1f %.1f -> %.1f %.1f %.1f", i + 1, t.wreckPos[0], t.wreckPos[1], t.wreckPos[2], wx, wy, wz);
+        t.wreckPos[0] = wx; t.wreckPos[1] = wy; t.wreckPos[2] = wz;
+        if (!t.prevFound) { LogLine("convoy %2d: found (wrecked=%d, graph state %d, wreck pos %.1f %.1f %.1f)", i + 1, t.wrecked, t.graphState, wx, wy, wz); t.prevFound = true; t.prevWrecked = t.wrecked; t.prevGraphState = t.graphState; }
         if (t.wrecked != t.prevWrecked) { LogLine("convoy %2d: %s", i + 1, t.wrecked ? "WRECKED (flag set)" : "wrecked flag cleared"); t.prevWrecked = t.wrecked; }
         if (t.graphState != t.prevGraphState) { LogLine("convoy %2d: graph state %d -> %d", i + 1, t.prevGraphState, t.graphState); t.prevGraphState = t.graphState; }
 
@@ -1645,8 +1744,6 @@ static void ConvoyRespawnSweep(float elapsed, bool force) {
             t.delayRemaining -= elapsed;
         }
 
-        const float* wreckMat = (const float*)((uintptr_t)container + 0xD8);
-        float wx = wreckMat[12], wy = wreckMat[13], wz = wreckMat[14];
         bool haveWreckPos = (wx != 0.0f || wy != 0.0f || wz != 0.0f);
         if (haveWreckPos) {
             float dx = g_PlayerPos.x - wx, dy = g_PlayerPos.y - wy, dz = g_PlayerPos.z - wz;
@@ -1674,9 +1771,9 @@ static void LogConvoySnapshot(const char* why) {
     for (int i = 0; i < g_convoyPairCount; i++) {
         const TrackedConvoy& t = g_tracked[i];
         if (!t.foundThisSweep) { LogLine("    convoy %2d: not found", i + 1); continue; }
-        if (!t.wrecked) LogLine("    convoy %2d: active (graph state %d) respawns %d", i + 1, t.graphState, t.respawns);
-        else if (!t.armed) LogLine("    convoy %2d: WRECKED, wreck flow running (graph state %d)", i + 1, t.graphState);
-        else LogLine("    convoy %2d: WRECKED, respawn in %.0fs, player %.0fm from wreck", i + 1, t.delayRemaining, t.lastDistance);
+        if (!t.wrecked) LogLine("    convoy %2d: active (graph state %d) respawns %d, wreck pos %.1f %.1f %.1f", i + 1, t.graphState, t.respawns, t.wreckPos[0], t.wreckPos[1], t.wreckPos[2]);
+        else if (!t.armed) LogLine("    convoy %2d: WRECKED, wreck flow running (graph state %d), wreck pos %.1f %.1f %.1f", i + 1, t.graphState, t.wreckPos[0], t.wreckPos[1], t.wreckPos[2]);
+        else LogLine("    convoy %2d: WRECKED, respawn in %.0fs, player %.0fm from wreck, wreck pos %.1f %.1f %.1f", i + 1, t.delayRemaining, t.lastDistance, t.wreckPos[0], t.wreckPos[1], t.wreckPos[2]);
     }
 }
 
@@ -1695,6 +1792,9 @@ static void ConvoyRespawnTick(float dt) {
 // Release overlay: small, silent-by-default status the mod author needs
 // (proof it's alive) without dumping internal hook plumbing on an end user.
 // F3 expands it into the full diagnostic view for troubleshooting reports.
+#if MM_DEV_TOOLS || MM_WORLD_REPOP
+static char g_snOverlay[192];   // nearest sniper tower line (written once a second by SniperTick in camp_repop.inc)
+#endif
 class ConvoyModOverlay : public ImGuiRenderer {
 	void Render() override {
 #if MM_DEV_TOOLS
@@ -1711,6 +1811,7 @@ class ConvoyModOverlay : public ImGuiRenderer {
 		ImGui::Text("Invincibility (F1): %s", enabledInvincibility ? "ON" : "off");
 		ImGui::Text("Vehicle: %s", (g_lastCurrentVehicle && g_lastCurrentVehicle == g_lastSignatureVehicle) ? "Magnum Opus" :
 			(g_lastCurrentVehicle ? "another car" : "on foot"));
+		if (g_snOverlay[0]) { char l[sizeof g_snOverlay]; memcpy(l, g_snOverlay, sizeof l); l[sizeof l - 1] = 0; ImGui::Text("%s", l); }
 		if (g_showDiagnostics) {
 			ImGui::Separator();
 			ImGui::Text("Current vehicle: %p  |  Magnum Opus: %p  |  chassis: %p", g_lastCurrentVehicle, g_lastSignatureVehicle, g_lastChassis);
@@ -1799,7 +1900,210 @@ class ConvoyModOverlay : public ImGuiRenderer {
 		ImGui::End();
 	}
 };
+#if MM_DEV_TOOLS || MM_WORLD_REPOP
+// ---- camp repopulation test (2026-10-13) --------------------------------------------------------------------------------------
+// Liberating a camp sends one event that switches off the camp's enemy location (world.bin entry *_gameplay / *_spawn, disable
+// list 83DEBF1B) and switches on its civilian location (enable list 43D36548); the save keeps both flags. This test does the
+// reverse for one camp the way the event handler does it: SLocationInfo::HandleEvent (0x14066C430) only sets or clears bit0 of
+// +0x67 (enable list at +0x70, disable list at +0x78) and the streaming update loads or unloads by distance. (First try, 2026-10-13:
+// GameLocationSystemInfoEnableLoading/DisableLoading are only the streaming block in +0x66, not the enabled flag -- the civilians
+// went away, the enemies never came back.) Only these two locations change:
+// the camp's main location (scrap crates, insignias, collectibles) is never touched. Table generated by
+// tools/repopulate_table.py (scrap and fuel depots whose enemy location has no collectible).
+// SLocationInfo (one per world.bin entry and file type): id +0x18 (hash of the path), type +0x65 (4 .nl, 8 .fl, 0x10 .bl),
+// flags +0x67 (bit0 enabled, bit2 loaded). Context 0x14179F0D8: vector of SLocationInfo* at +8..+0x10. GOG addresses (dev only).
+struct CampEntry { unsigned enemyId, civilianId; float x, z; const char* name; };
+static const CampEntry g_camps[] = {
+    { 0x01212177, 0x6B1CBF6E, -9502.f, -745.f, "a02_fd2030_gameplay" },
+    { 0x0DC15ED8, 0xAD1D544C, -2082.f, 4968.f, "a01_sd1030_gameplay" },
+    { 0x2BDD7106, 0x90889273, -3103.f, 2314.f, "a01_fd1110_spawn" },
+    { 0x30335AF6, 0xEFBDDFE7, -3564.f, 3116.f, "a01_fd1090_gameplay" },
+    { 0x464CEAF8, 0x9186B2A7, -6990.f, 5873.f, "a01_sd1330_spawn" },
+    { 0x5243642C, 0xBC2151E7, -9026.f, 3482.f, "a01_fd1050_spawn" },
+    { 0x5525AEE9, 0xE867CAA6, -3934.f, 2074.f, "a01_sd1130_gameplay" },
+    { 0x5C876D19, 0xBE817E88, -5630.f, 6115.f, "a01_sd1010_gameplay" },
+    { 0x683BCC6A, 0x8F2F9582, -4486.f, 2881.f, "a01_fd1080_logic" },
+    { 0x68532541, 0xA049E4A5, -8454.f, 5507.f, "a01_sd1080_gameplay" },
+    { 0x6E78B7E6, 0x67B9BD7C, -3755.f, 4807.f, "a01_sd1190_gameplay" },
+    { 0x70E37637, 0x26247AF0, -7220.f, 2192.f, "a01_sd1090_gameplay" },
+    { 0x72A2D8E4, 0x96ABF98C, -3898.f, 6167.f, "a01_sd1290_spawn" },
+    { 0x7AD28246, 0xDA0501D7, -4856.f, 336.f, "a02_sd2090_gameplay" },
+    { 0x83F6A0F7, 0x0978DE1F, -5968.f, 667.f, "a02_sd2010_gameplay" },
+    { 0x8E91C5F7, 0xF5441C8D, -7897.f, -2616.f, "a02_sd2030_gameplay" },
+    { 0x8EAECF51, 0x79B173C4, -7915.f, 585.f, "a02_fd2040_gameplay" },
+    { 0xAD6FDB7E, 0x5862E92E, -2887.f, 4011.f, "a01_sd1170_gameplay" },
+    { 0xB4D17B50, 0xACE2E1DA, -1676.f, 4138.f, "a01_sd1300_gameplay" },
+    { 0xB8788A79, 0x2CF6703D, -4514.f, 4169.f, "a01_sd1200_gameplay" },
+    { 0xD70F6C49, 0x68F0AC34, -3471.f, 5693.f, "a01_sd1270_gameplay" },
+    { 0xE46FA8A7, 0x5D82EC11, -8036.f, 2348.f, "a01_sd1240_gameplay" },
+    { 0xE4BE075D, 0xBF77A52A, -5872.f, 3511.f, "a01_sd1210_spawn" },
+    { 0xF8FBEA29, 0xBD19C67B, -8611.f, -407.f, "a02_sd2060_gameplay" },
+#if MM_DEV_TOOLS
+    // warchief camps (Top Dog strongholds, 2026-10-16 test): same layout, enemy part without collectibles (repopulate_table.py)
+    { 0x0E77AB96, 0xF23C43C9, -8026.f, 4138.f, "a01_wc1050_gameplay" },
+    { 0x27ECF4B1, 0xCBCAFC3A, -5384.f, -513.f, "a02_wc2040_spawn" },
+    { 0xC72615C6, 0x2E5ADAAF, -4498.f, 5468.f, "a01_wc1020_spawn" },
+    { 0xE1C95370, 0x2E7E4843, -9987.f, -1834.f, "a02_wc2020_gameplay" },
+#endif
+};
+static const uintptr_t A_LocContext = 0x14179F0D8;
+
+static int FindLocations(unsigned id, uint8_t** out, int max) {
+    int n = 0;
+    __try {
+        const uint8_t* ctx = *(const uint8_t* const*)A_LocContext;
+        if (!ctx) return 0;
+        uint8_t* const* b = *(uint8_t* const* const*)(ctx + 8);
+        uint8_t* const* e = *(uint8_t* const* const*)(ctx + 0x10);
+        if (!b || e < b || e - b > 20000) return 0;
+        for (uint8_t* const* it = b; it != e && n < max; ++it)
+            if (*it && *(const unsigned*)(*it + 0x18) == id) out[n++] = *it;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return n; }
+    return n;
+}
+
+// enabled flag of a camp part: 1 if every file of it (.nl/.fl) is enabled, 0 if none, -1 not found, 2 mixed
+static int LocEnabled(unsigned id, int* loaded) {
+    uint8_t* l[4]; int n = FindLocations(id, l, 4), on = 0;
+    *loaded = 0;
+    for (int i = 0; i < n; i++) { if (l[i][0x67] & 1) on++; if (l[i][0x67] & 4) (*loaded)++; }
+    return n == 0 ? -1 : on == 0 ? 0 : on == n ? 1 : 2;
+}
+
+static float CampDistance(const CampEntry& c) {
+    float dx = g_PlayerPos.x - c.x, dz = g_PlayerPos.z - c.z;
+    return sqrtf(dx * dx + dz * dz);
+}
+
+static void CampLogAll(const char* why) {
+    int liberated = 0;
+    LogLine("CAMPS (%s): player at %.0f %.0f %.0f", why, g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z);
+    for (const CampEntry& c : g_camps) {
+        int el, cl; int e = LocEnabled(c.enemyId, &el), v = LocEnabled(c.civilianId, &cl);
+        if (e == 0) liberated++;
+        LogLine("    %-26s enemies %s (loaded %d)  civilians %s (loaded %d)  %.0f m", c.name,
+            e == 1 ? "ON " : e == 0 ? "off" : e == 2 ? "mix" : "n/a", el, v == 1 ? "ON " : v == 0 ? "off" : v == 2 ? "mix" : "n/a", cl, CampDistance(c));
+    }
+    LogLine("CAMPS: %d of %d have their enemies switched off (liberated)", liberated, (int)(sizeof g_camps / sizeof g_camps[0]));
+}
+
+// Repair after the camprepop/camprepop2 tests (2026-10-13): in the first test all 24 table camps were liberated (enemies off,
+// civilians on); camprepop2 left some with enemies on / civilians off, and the save kept it. This puts every table camp back
+// the way the liberation event leaves it: enemy entries bit0 cleared, civilian entries bit0 set.
+static void CampRestoreLiberated() {
+    int fixedE = 0, fixedC = 0;
+    for (const CampEntry& c : g_camps) {
+        uint8_t* en[4]; uint8_t* cv[4];
+        int ne = FindLocations(c.enemyId, en, 4), nc = FindLocations(c.civilianId, cv, 4);
+        for (int i = 0; i < ne; i++) if (en[i][0x67] & 1) {
+            int b = en[i][0x67]; en[i][0x67] &= ~1; fixedE++;
+            LogLine("CAMP RESTORE: %s enemy entry type %d f67 %02X -> %02X", c.name, en[i][0x65], b, en[i][0x67]);
+        }
+        for (int i = 0; i < nc; i++) if (!(cv[i][0x67] & 1)) {
+            int b = cv[i][0x67]; cv[i][0x67] |= 1; fixedC++;
+            LogLine("CAMP RESTORE: %s civilian entry type %d f67 %02X -> %02X", c.name, cv[i][0x65], b, cv[i][0x67]);
+        }
+    }
+    LogLine("CAMP RESTORE: %d enemy entries switched off, %d civilian entries switched on", fixedE, fixedC);
+}
+
+static int g_campsRepopulated = 0;
+static void CampRepopulateNearest() {
+    const CampEntry* best = nullptr; float bestD = 1e30f;
+    for (const CampEntry& c : g_camps) {
+        int el; if (LocEnabled(c.enemyId, &el) != 0) continue;           // only camps whose enemies are switched off
+        float d = CampDistance(c);
+        if (d < bestD) { bestD = d; best = &c; }
+    }
+    if (!best) { LogLine("CAMP REPOPULATE: no liberated camp in the table"); return; }
+    uint8_t* en[4]; uint8_t* cv[4];
+    int ne = FindLocations(best->enemyId, en, 4), nc = FindLocations(best->civilianId, cv, 4);
+    LogLine("CAMP REPOPULATE: %s at %.0f m: enabling %d enemy location(s), disabling %d civilian location(s)", best->name, bestD, ne, nc);
+    for (int i = 0; i < ne; i++) {
+        int before = en[i][0x67];
+        en[i][0x67] |= 1;                                                   // what an enable event does
+        LogLine("    enemy    %p type %d f66 %02X f67 %02X -> %02X container %p", en[i], en[i][0x65], en[i][0x66], before, en[i][0x67],
+            *(void**)(en[i] + 0x20));
+    }
+    for (int i = 0; i < nc; i++) {
+        int before = cv[i][0x67];
+        cv[i][0x67] &= ~1;                                                  // what a disable event does
+        LogLine("    civilian %p type %d f66 %02X f67 %02X -> %02X container %p", cv[i], cv[i][0x65], cv[i][0x66], before, cv[i][0x67],
+            *(void**)(cv[i] + 0x20));
+    }
+    g_campsRepopulated++;
+}
+#endif // MM_DEV_TOOLS || MM_WORLD_REPOP
+
+#if MM_DEV_TOOLS
+// ---- unattended test mode (2026-10-13) ----------------------------------------------------------------------------------------
+// Active only when <game>\scripts\autotest.txt exists: one waypoint per line, "x y z seconds" (up to 8). Once the player has been
+// in the world for 20 s of game time, the player (or their car) is moved to each waypoint in turn and kept there for its seconds,
+// invulnerable; the position is logged every 5 s; after the last one the log says AUTOTEST done (the test driver then closes the
+// game). Used to test location changes without the user (e.g. camp -> far away -> camp again, to force a reload).
+static int g_autotest = -1;                      // -1 unknown, 0 off, 1 waiting, 2 running, 3 done
+static float g_autoWp[8][4]; static int g_autoN = 0, g_autoI = 0;
+static float g_autoClock = 0.f, g_autoLog = 0.f;
+static void AutotestTeleport(CCharacter* ch, CVehicle* veh, const float* p) {
+    CMatrix4f m;
+    if (veh) { veh->SetVelocity(CVector3f()); veh->GetTransform(&m); }
+    else { ch->ForceNeutralState(); ch->GetTransform(&m); }
+    m.SetPosition(CVector3f(p[0], p[1], p[2]));
+    if (veh) veh->SetTransform(&m); else ch->SetTransform(&m);
+    LogLine("AUTOTEST waypoint %d/%d (%s): from %.0f %.0f %.0f to %.1f %.1f %.1f for %.0f s", g_autoI + 1, g_autoN, veh ? "car" : "on foot",
+        g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z, p[0], p[1], p[2], p[3]);
+}
+// the first seconds after a teleport the player is put back on the waypoint every frame: the ground there may not be streamed in
+// yet (autotest DRMENU1 2026-10-15: Max fell from a Death Run platform and died)
+static void AutotestHold(CCharacter* ch, CVehicle* veh, const float* p) {
+    CMatrix4f m;
+    if (veh) { veh->SetVelocity(CVector3f()); veh->GetTransform(&m); } else ch->GetTransform(&m);
+    m.SetPosition(CVector3f(p[0], p[1], p[2]));
+    if (veh) veh->SetTransform(&m); else ch->SetTransform(&m);
+}
+static void AutotestTick(CCharacter* ch, float dt) {
+    if (g_autotest == -1) {
+        g_autotest = 0;
+        char path[MAX_PATH]; GetModuleFileNameA(NULL, path, MAX_PATH);
+        char* sl = strrchr(path, '\\'); if (sl) sl[1] = 0;
+        strcat_s(path, "scripts\\autotest.txt");
+        FILE* f = nullptr;
+        if (fopen_s(&f, path, "r") == 0 && f) {
+            while (g_autoN < 8 && fscanf_s(f, "%f %f %f %f", &g_autoWp[g_autoN][0], &g_autoWp[g_autoN][1], &g_autoWp[g_autoN][2],
+                   &g_autoWp[g_autoN][3]) == 4) g_autoN++;
+            fclose(f);
+            if (g_autoN) g_autotest = 1;
+            LogLine("AUTOTEST armed: %d waypoint(s)", g_autoN);
+        }
+    }
+    if (g_autotest <= 0 || g_autotest == 3 || !ch) return;
+    g_autoClock += dt;
+    ch->m_Invulnerable = true;
+    CVehicle* veh = ch->GetVehiclePtr();
+    if (veh) veh->m_Invulnerable = true;
+    if (g_autotest == 1) {
+        if (g_autoClock < 20.f) return;
+        g_autotest = 2; g_autoI = 0; g_autoClock = 0.f; g_autoLog = 0.f;
+        AutotestTeleport(ch, veh, g_autoWp[0]);
+        return;
+    }
+    if (g_autoClock < 8.f) AutotestHold(ch, veh, g_autoWp[g_autoI]);
+    g_autoLog += dt;
+    if (g_autoLog >= 5.f) { g_autoLog = 0.f; LogLine("AUTOTEST wp %d +%.0fs player at %.1f %.1f %.1f", g_autoI + 1, g_autoClock, g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z); }
+    if (g_autoClock >= g_autoWp[g_autoI][3]) {
+        if (++g_autoI >= g_autoN) { LogLine("AUTOTEST done"); g_autotest = 3; return; }
+        g_autoClock = 0.f;
+        AutotestTeleport(ch, veh, g_autoWp[g_autoI]);
+    }
+}
+#endif
+
 static ConvoyModOverlay g_convoyModOverlay;
+#if MM_DEV_TOOLS || MM_WORLD_REPOP
+static bool g_worldRepopOn = false;     // set in PluginHooks: only on the GOG build whose addresses camp_repop.inc uses
+#include "camp_repop.inc"
+#include "threat_diag.inc"
+#endif
 DEFHOOK(void, CPlayer__UpdateController, (void* thiz, float dt)) {
 	CCharacter* ch = *(CCharacter**)((uintptr_t)thiz + 0x20);
 
@@ -1822,6 +2126,26 @@ DEFHOOK(void, CPlayer__UpdateController, (void* thiz, float dt)) {
 #if MM_DEV_TOOLS && MM_STORM_TOOLS
 	WeatherTick(dt);
 	StormPresetTick(dt);
+#endif
+
+#if MM_DEV_TOOLS
+    AutotestTick(ch, dt);
+#endif
+#if MM_DEV_TOOLS || MM_WORLD_REPOP
+    if (g_worldRepopOn) { RepopTick(dt); ThreatDiagTick(dt); }
+#endif
+#if MM_DEV_TOOLS
+    if (g_worldRepopOn) {   // camps: numpad 4 = log every camp, numpad 5 = repopulate the nearest liberated camp now, numpad 6 = repair (all liberated)
+        static bool np4, np5, np6, np7;
+        bool k4 = (GetAsyncKeyState(VK_NUMPAD4) & 0x8000) != 0, k5 = (GetAsyncKeyState(VK_NUMPAD5) & 0x8000) != 0;
+        bool k6 = (GetAsyncKeyState(VK_NUMPAD6) & 0x8000) != 0, k7 = (GetAsyncKeyState(VK_NUMPAD7) & 0x8000) != 0;
+        if (k7 && !np7 && g_repopInit) SniperForceAll();      // numpad 7: every sniper tower skips its cooldown
+        np7 = k7;
+        if (k4 && !np4) { CampLogAll("numpad 4"); RepopLog(); }
+        if (k5 && !np5) RepopForceNearest();
+        if (k6 && !np6) { CampRestoreLiberated(); CampLogAll("after numpad 6 (repair)"); }
+        np4 = k4; np5 = k5; np6 = k6;
+    }
 #endif
 
     static CVector3f savePos;
@@ -2076,6 +2400,41 @@ void PluginHooks() {
 	LogLine("overlay: %s", g_overlayAvailable ? "installed" : "skipped (unknown build; mod still active, diagnostics only in this log)");
 
     HookMgr::Install(g_sigs[SIG_UPDATECONTROLLER].resolved, CPlayer__UpdateController_hook, CPlayer__UpdateController_orig);
+#if MM_DEV_TOOLS || MM_WORLD_REPOP
+    g_worldRepopOn = HookMgr::IsKnownGogBuild();
+    if (!g_worldRepopOn) LogLine("world repopulation: OFF (not the GOG build its addresses were taken from)");
+    else {   // camp repopulation: saves keep repopulated camps liberated (GOG addresses)
+        MH_STATUS c = MH_CreateHook((LPVOID)0x1406393B0, (LPVOID)LocSaveStatus_hook, (LPVOID*)&LocSaveStatus_orig);
+        MH_STATUS e = c == MH_OK ? MH_EnableHook((LPVOID)0x1406393B0) : c;
+        LogLine("camp repopulation: save-status hook %s", MH_StatusToString(e));
+        MH_STATUS c2 = MH_CreateHook((LPVOID)A_DestructibleLoad, (LPVOID)DestructibleLoad_hook, (LPVOID*)&DestructibleLoad_orig);
+        MH_STATUS e2 = c2 == MH_OK ? MH_EnableHook((LPVOID)A_DestructibleLoad) : c2;
+        LogLine("camp repopulation: destructible-load hook (War Criers) %s", MH_StatusToString(e2));
+        MH_STATUS c3 = MH_CreateHook((LPVOID)A_TargetSave, (LPVOID)TargetSave_hook, (LPVOID*)&TargetSave_orig);
+        MH_STATUS e3 = c3 == MH_OK ? MH_EnableHook((LPVOID)A_TargetSave) : c3;
+        LogLine("sniper repopulation: harpoon-target save hook %s", MH_StatusToString(e3));
+        ThreatDiagInstall();
+        FILE* f = nullptr; char path[MAX_PATH]; GetModuleFileNameA(NULL, path, MAX_PATH);
+        char* sl = strrchr(path, '\\'); if (sl) sl[1] = 0;
+        {   // test switch: Top Dogs / warchiefs come back with their camp
+            char tp[MAX_PATH]; strcpy_s(tp, path); strcat_s(tp, "scripts\\repop_topdogs.txt");
+            g_topDogsBack = GetFileAttributesA(tp) != INVALID_FILE_ATTRIBUTES;
+            LogLine("camp repopulation: Top Dogs %s", g_topDogsBack ? "COME BACK (repop_topdogs.txt)" : "stay dead");
+            // The Top Dog's death must run the camp completion: in a warchief camp it is what opens the arena gates (base object
+            // "05_open_gates_trigger (camp_completed)"). The earlier completion-event filter dropped top_dog.camp_complete too and
+            // trapped the player in the arena (user test 2026-10-16 wc1020). So completion now runs normally when a revived Top Dog
+            // dies (the "liberated" notice shows again; harmless). The event-send hook is kept in the source but not installed.
+            (void)A_EventSend; (void)&EventSend_hook; (void)EventSend_orig;
+        }
+        strcat_s(path, "scripts\\repop_test.txt");             // test override: "cooldown_min_s cooldown_max_s"
+        if (fopen_s(&f, path, "r") == 0 && f) {
+            float a = 0, b = 0;
+            if (fscanf_s(f, "%f %f", &a, &b) == 2 && a >= 0 && b >= a) { g_repopCooldownMin = a; g_repopCooldownMax = b; }
+            fclose(f);
+            LogLine("camp repopulation: test cooldown %.0f-%.0f s", g_repopCooldownMin, g_repopCooldownMax);
+        }
+    }
+#endif
 
     // Addresses from AVAMain_F.pdb, verified 2026-09-15 by parsing the user's
     // own AVAMain.exe PE headers and confirming the RVA lands on a real
