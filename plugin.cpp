@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <intrin.h>
 #include "mm/imgui/imgui.h"
 #include <mm/game/go/character.h>
 #include "mm/game/go/vehicle.h"
@@ -38,10 +39,19 @@
 // without two plugins answering F5/F11 and firing storms.
 #define MM_STORM_TOOLS 0
 
+// Unattended camp test (2026-11-10): only the autotest mode of MM_DEV_TOOLS (scripts\autotest.txt, tools\repop\autotest.ps1), with its
+// camp commands, without the dev keys and overlay. Test builds only; a distributed build ships with 0.
+#define MM_AUTOTEST 0
+#if MM_AUTOTEST
+#define MM_AUTOTEST_TAG " autotest"
+#else
+#define MM_AUTOTEST_TAG ""
+#endif
+
 // User-requested (2026-09-18): always show a visible tag for whatever
 // build is currently installed, so it's never ambiguous which test is
 // running. Bump this string every time a new test build goes out.
-#define MM_BUILD_TAG "v0.9.3-beta1 (2026-10-16)"
+#define MM_BUILD_TAG "v0.9.3-beta1r28 (2026-11-11)" MM_AUTOTEST_TAG
 
 // ---- Session event log (2026-09-21) ----
 // Replaces screenshot-driven debugging: every notable event (wreck seen,
@@ -135,6 +145,8 @@ enum { SIG_SETWRECKED = 0, SIG_FINDOPTIONAL, SIG_UPDATECONTROLLER, SIG_ADDTOUPDA
 
 typedef void* (*CharacterGetVehicleFn)(void* character);
 static CharacterGetVehicleFn CharacterGetVehiclePtr = nullptr; // from g_sigs[SIG_GETVEHICLEPTR]
+typedef bool (*FireStartFn)(void* processor, unsigned int startNameHash);
+static FireStartFn ProcessorFireStart = nullptr;   // from g_sigs[SIG_FIRESTART]
 static bool g_overlayAvailable = false;   // the SDK's own hard-coded addresses (overlay) only fit two known builds
 
 static uintptr_t g_exeBase = 0;
@@ -747,8 +759,6 @@ int g_forceStormPresses = 0;
 // when the previous interval expires), and whether 60 s storms upset anything
 // that assumes they are rare. Test on save 4 only.
 static void* FindGameObjectByIdAndRelease(uint64_t id);   // defined with the respawn sweep below
-typedef bool (*FireStartFn)(void* processor, unsigned int startNameHash);
-static FireStartFn ProcessorFireStart = nullptr;   // from g_sigs[SIG_FIRESTART]
 
 const uint64_t ENCOUNTER_SYSTEM_OBJECT_ID = 4252045013ull;                  // gsr.encounter_system in global.blo
 const unsigned int ENCOUNTER_SYSTEM_PATH_HASH = 0x99BD2CEAu;                // Jenkins("graphs/open_world/encounter_system.gsrc")
@@ -1608,24 +1618,70 @@ static LONG CALLBACK CrashStackHandler(EXCEPTION_POINTERS* ep) {
 // (wreck from a previous session), the distance gate is skipped and the
 // delay alone applies -- the worst case is then identical to vanilla
 // behaviour on a fresh load near a route.
-struct ConvoyPair { uint64_t containerId; uint64_t logicGraphId; };
+struct ConvoyPair { uint64_t containerId; uint64_t logicGraphId; unsigned routeId; };   // routeId: field 30E81847 of the logic graph, what GUIXAddConvoyRoute keys the map route by
 static const ConvoyPair g_convoyPairs[] = {
-    { 0x7E90E3F6, 0xE6D229A4 },
-    { 0x38A45D73, 0x65271E53 },
-    { 0x8F1728CD, 0x8902D2DC },
-    { 0x59501178, 0xEA9391A6 },
-    { 0x7D6BB232, 0xC52D952C },
-    { 0x132E3492, 0x12F7F772 },
-    { 0x42D456AE, 0xA79A34DB },
-    { 0x7C5903DF, 0x02794167 },
-    { 0x6FDA7EF0, 0x7389B76D },
-    { 0x337019D7, 0x70F9DD52 },
-    { 0x1FA21EA1, 0xC415F9A8 },
-    { 0xB6418D01, 0x84FCD7AC },
-    { 0x74C87945, 0x2C42382A },
-    { 0x35762FBA, 0x204F397C },
+    { 0x7E90E3F6, 0xE6D229A4, 0xFEF9954A },
+    { 0x38A45D73, 0x65271E53, 0x00000000 },
+    { 0x8F1728CD, 0x8902D2DC, 0x5FD12B2C },
+    { 0x59501178, 0xEA9391A6, 0xE3CA191D },
+    { 0x7D6BB232, 0xC52D952C, 0x94EC179D },
+    { 0x132E3492, 0x12F7F772, 0x98AEFE84 },
+    { 0x42D456AE, 0xA79A34DB, 0xF77B37E6 },
+    { 0x7C5903DF, 0x02794167, 0x7EC00658 },
+    { 0x6FDA7EF0, 0x7389B76D, 0x5350F446 },
+    { 0x337019D7, 0x70F9DD52, 0x8B7A9F9C },
+    { 0x1FA21EA1, 0xC415F9A8, 0xBFF0EB2B },
+    { 0xB6418D01, 0x84FCD7AC, 0x9387CF7B },
+    { 0x74C87945, 0x2C42382A, 0x610AD2CE },
+    { 0x35762FBA, 0x204F397C, 0xE016B9F6 },
 };
 const int g_convoyPairCount = sizeof(g_convoyPairs) / sizeof(g_convoyPairs[0]);
+
+// The wreck handler marks the map route wrecked (GUIXSetConvoyRouteWrecked always passes true) and the map draws such a route as completed. Nothing clears the mark, as a
+// convoy never comes back in the vanilla game, so a respawned convoy kept a finished route until the next load. Fixed address, checked first: other builds keep the mark.
+static void ConvoyRouteClearWrecked(int i) {
+    static const uintptr_t A_GameGuiSetConvoyRouteWrecked = 0x14022FA10;
+    static const uint8_t head[3] = { 0x4C, 0x8B, 0x05 };
+    unsigned id = g_convoyPairs[i].routeId;
+    if (!id) return;
+    __try {
+        const uint8_t* p = (const uint8_t*)A_GameGuiSetConvoyRouteWrecked;
+        if (memcmp(p, head, sizeof head) || p[7] != 0x4C || p[8] != 0x8B || p[9] != 0x15) { LogLine("convoy %2d: map route left as it is (unknown code)", i + 1); return; }
+        ((void (*)(const unsigned*, bool))A_GameGuiSetConvoyRouteWrecked)(&id, false);
+        LogLine("convoy %2d: map route %08X no longer marked wrecked", i + 1, id);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { LogLine("convoy %2d: map route call FAULTED", i + 1); }
+}
+
+// Convoy 1 is Dim Rim's, the only convoy on the map that starts switched off (ConvoyActive 0): mission mm1038 sends the event behind Start 903D2DBA, which sets that flag, and a graph rebuilt by a load or a
+// respawn starts off again. Once the mission is done nothing sends it any more, so the route stays on the map with no cars. Fired here the way the game does for the event (FireReceivedActionStartNodes); sent
+// again every minute because a load rebuilds the graph unseen and a second Start only rewrites the flag (Node[8]). Before the mission is done this does nothing. Fixed addresses, checked first as above.
+static const int CONVOY_DIM_RIM = 0;
+static const unsigned CONVOY_ACTIVE_ENABLED_START = 0x903D2DBAu;
+static const unsigned MISSION_DIM_RIM = 0x946AF1C1u;   // Jenkins("mm1038"), what the dialogue scripts pass to logbook.IsMissionCompleted
+static const float CONVOY_DIM_RIM_RESEND_S = 60.0f;
+
+static bool LogBookMissionDone(unsigned mission) {
+    static const uintptr_t A_LogBookInstance = 0x141719778;
+    static const uintptr_t A_LogBookIsMissionCompleted = 0x1403024B0;
+    static const uint8_t head[7] = { 0x48, 0x8B, 0x81, 0xB8, 0x04, 0x00, 0x00 };
+    __try {
+        if (memcmp((const void*)A_LogBookIsMissionCompleted, head, sizeof head)) return false;
+        void* book = *(void**)A_LogBookInstance;
+        return book && ((bool (*)(void*, const unsigned*))A_LogBookIsMissionCompleted)(book, &mission);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static void ConvoyDimRimEnable(void* graphObj, float elapsed) {
+    static void* lastProcessor = nullptr;
+    static float sinceSent = CONVOY_DIM_RIM_RESEND_S;
+    void* processor = *(void**)((uintptr_t)graphObj + 0xF0);
+    sinceSent += elapsed;
+    if (!processor || !ProcessorFireStart || (processor == lastProcessor && sinceSent < CONVOY_DIM_RIM_RESEND_S) || !LogBookMissionDone(MISSION_DIM_RIM)) return;
+    sinceSent = 0.0f;
+    bool found = ProcessorFireStart(processor, CONVOY_ACTIVE_ENABLED_START);
+    if (processor != lastProcessor) LogLine("convoy %2d: mission mm1038 done, switched on (start %s)", CONVOY_DIM_RIM + 1, found ? "sent" : "NOT FOUND");
+    lastProcessor = processor;
+}
 
 const float CONVOY_RESPAWN_DELAY_MIN_S = 180.0f;
 const float CONVOY_RESPAWN_DELAY_MAX_S = 480.0f;
@@ -1722,6 +1778,7 @@ static void ConvoyRespawnSweep(float elapsed, bool force) {
 
         if (!t.wrecked) {
             t.armed = false;
+            if (i == CONVOY_DIM_RIM && t.graphState == 2) ConvoyDimRimEnable(graphObj, elapsed);
             // Recovery: a rebuild we kicked off that the engine never picked up
             // (state 0, no processor) -- re-register it so UpdatePostSim runs.
             // Freshly created objects also pass through state 0 for a frame
@@ -1763,6 +1820,7 @@ static void ConvoyRespawnSweep(float elapsed, bool force) {
         t.respawns++;
         g_totalAutoRespawns++;
         LogLine("convoy %2d: RESPAWN triggered%s (player %.0fm from wreck, total this session %d)", i + 1, force ? " by F4/F9" : "", t.lastDistance, g_totalAutoRespawns);
+        ConvoyRouteClearWrecked(i);
     }
 }
 
@@ -2035,31 +2093,73 @@ static void CampRepopulateNearest() {
 }
 #endif // MM_DEV_TOOLS || MM_WORLD_REPOP
 
-#if MM_DEV_TOOLS
-// ---- unattended test mode (2026-10-13) ----------------------------------------------------------------------------------------
-// Active only when <game>\scripts\autotest.txt exists: one waypoint per line, "x y z seconds" (up to 8). Once the player has been
+#if MM_DEV_TOOLS || MM_AUTOTEST
+// ---- unattended test mode (2026-10-13; camp commands 2026-11-10) ------------------------------------------------------------------------
+// Active only when <game>\scripts\autotest.txt exists: one waypoint per line (up to 24), "x y z seconds [command]" or "@camp dx dz seconds
+// [command]": a camp of g_camps by part of its name (@sd2090), its centre moved by dx dz, on the ground (terrain height + 2.5 m, then the first
+// static surface below it, recomputed while the player is held there: the ground may not be streamed in at first). Once the player has been
 // in the world for 20 s of game time, the player (or their car) is moved to each waypoint in turn and kept there for its seconds,
-// invulnerable; the position is logged every 5 s; after the last one the log says AUTOTEST done (the test driver then closes the
-// game). Used to test location changes without the user (e.g. camp -> far away -> camp again, to force a reload).
+// invulnerable; the position is logged every 5 s; the command runs once, 8 s after arriving (camp_repop.inc AutotestCampCommand: "repop
+// <camp>", "kill", "log"). After the last one the log says AUTOTEST done (the test driver then closes the game). Used to test location
+// changes and camp repopulation without the user (e.g. camp -> far away -> camp again, to force a reload).
+static void AutotestCampCommand(const char* cmd);
+struct AutoWp { float p[3], secs; bool ground; char cmd[40]; };
 static int g_autotest = -1;                      // -1 unknown, 0 off, 1 waiting, 2 running, 3 done
-static float g_autoWp[8][4]; static int g_autoN = 0, g_autoI = 0;
-static float g_autoClock = 0.f, g_autoLog = 0.f;
-static void AutotestTeleport(CCharacter* ch, CVehicle* veh, const float* p) {
+static AutoWp g_autoWp[24]; static int g_autoN = 0, g_autoI = 0;
+static float g_autoClock = 0.f, g_autoLog = 0.f; static bool g_autoCmdDone;
+typedef float (*TerrainHeightFn)(const void* terrain, const float* p);
+static const TerrainHeightFn TerrainBilinearHeight = (TerrainHeightFn)0x14078BCF0;   // CTerrainMapBase::GetBilinearHeight(const CVector3f&)
+typedef float (*GroundHeightFn)(const float* p);
+static const GroundHeightFn GroundHeightBelow = (GroundHeightFn)0x14057FD40;       // CAirVehicle::GetGroundHeight_Expensive: a static-only ray from y + 1 down to the terrain, 200 at least
+static const uintptr_t A_TerrainMap = 0x141711D10;                                // CAvaSingle<CTerrainMapBase>::Instance
+static bool AutotestGround(float* p) {
+    __try {
+        const void* t = *(const void* const*)A_TerrainMap;
+        if (!t) return false;
+        float q[3] = { p[0], 0.f, p[2] };
+        q[1] = TerrainBilinearHeight(t, q) + 2.5f;
+        p[1] = GroundHeightBelow(q) + 0.3f;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+static void AutotestTeleport(CCharacter* ch, CVehicle* veh, AutoWp& w) {
+    if (w.ground) AutotestGround(w.p);
     CMatrix4f m;
     if (veh) { veh->SetVelocity(CVector3f()); veh->GetTransform(&m); }
     else { ch->ForceNeutralState(); ch->GetTransform(&m); }
-    m.SetPosition(CVector3f(p[0], p[1], p[2]));
+    m.SetPosition(CVector3f(w.p[0], w.p[1], w.p[2]));
     if (veh) veh->SetTransform(&m); else ch->SetTransform(&m);
-    LogLine("AUTOTEST waypoint %d/%d (%s): from %.0f %.0f %.0f to %.1f %.1f %.1f for %.0f s", g_autoI + 1, g_autoN, veh ? "car" : "on foot",
-        g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z, p[0], p[1], p[2], p[3]);
+    LogLine("AUTOTEST waypoint %d/%d (%s): from %.0f %.0f %.0f to %.1f %.1f %.1f%s for %.0f s%s%s", g_autoI + 1, g_autoN, veh ? "car" : "on foot",
+        g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z, w.p[0], w.p[1], w.p[2], w.ground ? " (ground)" : "", w.secs, w.cmd[0] ? ", then " : "", w.cmd);
+    g_autoCmdDone = false;
 }
 // the first seconds after a teleport the player is put back on the waypoint every frame: the ground there may not be streamed in
 // yet (autotest DRMENU1 2026-10-15: Max fell from a Death Run platform and died)
-static void AutotestHold(CCharacter* ch, CVehicle* veh, const float* p) {
+static void AutotestHold(CCharacter* ch, CVehicle* veh, AutoWp& w) {
+    if (w.ground) AutotestGround(w.p);
     CMatrix4f m;
     if (veh) { veh->SetVelocity(CVector3f()); veh->GetTransform(&m); } else ch->GetTransform(&m);
-    m.SetPosition(CVector3f(p[0], p[1], p[2]));
+    m.SetPosition(CVector3f(w.p[0], w.p[1], w.p[2]));
     if (veh) veh->SetTransform(&m); else ch->SetTransform(&m);
+}
+static void AutotestRead(FILE* f) {
+    char line[128];
+    while (g_autoN < 24 && fgets(line, sizeof line, f)) {
+        AutoWp& w = g_autoWp[g_autoN];
+        memset(&w, 0, sizeof w);
+        int used = 0;
+        if (line[0] == '@') {
+            char camp[24]; float dx, dz;
+            if (sscanf_s(line + 1, "%23s %f %f %f %n", camp, (unsigned)sizeof camp, &dx, &dz, &w.secs, &used) < 4) continue;
+            const CampEntry* c = nullptr;
+            for (const CampEntry& e : g_camps) if (strstr(e.name, camp)) c = &e;
+            if (!c) { LogLine("AUTOTEST: no camp \"%s\", line skipped", camp); continue; }
+            w.p[0] = c->x + dx; w.p[2] = c->z + dz; w.ground = true; used++;
+        } else if (sscanf_s(line, "%f %f %f %f %n", &w.p[0], &w.p[1], &w.p[2], &w.secs, &used) < 4) continue;
+        strncpy_s(w.cmd, line + used, _TRUNCATE);
+        for (size_t n = strlen(w.cmd); n && (w.cmd[n - 1] == '\n' || w.cmd[n - 1] == '\r' || w.cmd[n - 1] == ' '); n--) w.cmd[n - 1] = 0;
+        g_autoN++;
+    }
 }
 static void AutotestTick(CCharacter* ch, float dt) {
     if (g_autotest == -1) {
@@ -2069,8 +2169,7 @@ static void AutotestTick(CCharacter* ch, float dt) {
         strcat_s(path, "scripts\\autotest.txt");
         FILE* f = nullptr;
         if (fopen_s(&f, path, "r") == 0 && f) {
-            while (g_autoN < 8 && fscanf_s(f, "%f %f %f %f", &g_autoWp[g_autoN][0], &g_autoWp[g_autoN][1], &g_autoWp[g_autoN][2],
-                   &g_autoWp[g_autoN][3]) == 4) g_autoN++;
+            AutotestRead(f);
             fclose(f);
             if (g_autoN) g_autotest = 1;
             LogLine("AUTOTEST armed: %d waypoint(s)", g_autoN);
@@ -2079,18 +2178,24 @@ static void AutotestTick(CCharacter* ch, float dt) {
     if (g_autotest <= 0 || g_autotest == 3 || !ch) return;
     g_autoClock += dt;
     ch->m_Invulnerable = true;
+    // god mode and E3 invulnerability too (CDamageable +0xE9 / +0xEA: SetHealth keeps 0.1 at least): a whole camp killed the player
+    // through m_Invulnerable alone (autotest 2026-11-10, fd2030, game over 50 s in)
+    ((uint8_t*)ch)[0xE9] = 1; ((uint8_t*)ch)[0xEA] = 1;
     CVehicle* veh = ch->GetVehiclePtr();
     if (veh) veh->m_Invulnerable = true;
     if (g_autotest == 1) {
         if (g_autoClock < 20.f) return;
         g_autotest = 2; g_autoI = 0; g_autoClock = 0.f; g_autoLog = 0.f;
+        LogLine("AUTOTEST start: player at %.1f %.1f %.1f (%s)", g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z, veh ? "car" : "on foot");
         AutotestTeleport(ch, veh, g_autoWp[0]);
         return;
     }
-    if (g_autoClock < 8.f) AutotestHold(ch, veh, g_autoWp[g_autoI]);
+    AutoWp& w = g_autoWp[g_autoI];
+    if (g_autoClock < 8.f) AutotestHold(ch, veh, w);
+    else if (!g_autoCmdDone) { g_autoCmdDone = true; if (w.cmd[0]) AutotestCampCommand(w.cmd); }
     g_autoLog += dt;
     if (g_autoLog >= 5.f) { g_autoLog = 0.f; LogLine("AUTOTEST wp %d +%.0fs player at %.1f %.1f %.1f", g_autoI + 1, g_autoClock, g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z); }
-    if (g_autoClock >= g_autoWp[g_autoI][3]) {
+    if (g_autoClock >= w.secs) {
         if (++g_autoI >= g_autoN) { LogLine("AUTOTEST done"); g_autotest = 3; return; }
         g_autoClock = 0.f;
         AutotestTeleport(ch, veh, g_autoWp[g_autoI]);
@@ -2128,7 +2233,7 @@ DEFHOOK(void, CPlayer__UpdateController, (void* thiz, float dt)) {
 	StormPresetTick(dt);
 #endif
 
-#if MM_DEV_TOOLS
+#if MM_DEV_TOOLS || MM_AUTOTEST
     AutotestTick(ch, dt);
 #endif
 #if MM_DEV_TOOLS || MM_WORLD_REPOP
@@ -2388,9 +2493,7 @@ DEFHOOK(void, CPlayer__UpdateController, (void* thiz, float dt)) {
 void PluginHooks() {
 	CGameObject_FindOptional = (FindOptionalFn)g_sigs[SIG_FINDOPTIONAL].resolved;
 	if (g_sigs[SIG_GETVEHICLEPTR].matches == 1) CharacterGetVehiclePtr = (CharacterGetVehicleFn)g_sigs[SIG_GETVEHICLEPTR].resolved;
-#if MM_DEV_TOOLS
 	if (g_sigs[SIG_FIRESTART].matches == 1) ProcessorFireStart = (FireStartFn)g_sigs[SIG_FIRESTART].resolved;
-#endif
 
 	// The overlay lives in the vendored SDK, which still addresses the render
 	// hooks by hard-coded address for two known builds. On anything else it is
@@ -2413,6 +2516,16 @@ void PluginHooks() {
         MH_STATUS c3 = MH_CreateHook((LPVOID)A_TargetSave, (LPVOID)TargetSave_hook, (LPVOID*)&TargetSave_orig);
         MH_STATUS e3 = c3 == MH_OK ? MH_EnableHook((LPVOID)A_TargetSave) : c3;
         LogLine("sniper repopulation: harpoon-target save hook %s", MH_StatusToString(e3));
+        MH_STATUS c4 = MH_CreateHook((LPVOID)A_LocMainDone, (LPVOID)LocMainDone_hook, (LPVOID*)&LocMainDone_orig);
+        MH_STATUS e4 = c4 == MH_OK ? MH_EnableHook((LPVOID)A_LocMainDone) : c4;
+        LogLine("camp repopulation: map icon hook %s", MH_StatusToString(e4));
+        MH_STATUS c5 = MH_CreateHook((LPVOID)A_LocTrackedItems, (LPVOID)LocTrackedItems_hook, (LPVOID*)&LocTrackedItems_orig);
+        MH_STATUS e5 = c5 == MH_OK ? MH_EnableHook((LPVOID)A_LocTrackedItems) : c5;
+        MH_STATUS c6 = MH_CreateHook((LPVOID)A_GuiLocalizedText, (LPVOID)GuiLocalizedText_hook, (LPVOID*)&GuiLocalizedText_orig);
+        MH_STATUS e6 = c6 == MH_OK ? MH_EnableHook((LPVOID)A_GuiLocalizedText) : c6;
+        LogLine("camp repopulation: banner hooks %s, %s", MH_StatusToString(e5), MH_StatusToString(e6));
+        CampNoticeInit();
+        LogLine("camp repopulation: bodies stay %.0f s: %s", REPOP_BODY_SECONDS, RepopBodyTimePatch() ? "patched" : "NOT patched (unexpected bytes)");
         ThreatDiagInstall();
         FILE* f = nullptr; char path[MAX_PATH]; GetModuleFileNameA(NULL, path, MAX_PATH);
         char* sl = strrchr(path, '\\'); if (sl) sl[1] = 0;
@@ -2426,12 +2539,15 @@ void PluginHooks() {
             // dies (the "liberated" notice shows again; harmless). The event-send hook is kept in the source but not installed.
             (void)A_EventSend; (void)&EventSend_hook; (void)EventSend_orig;
         }
-        strcat_s(path, "scripts\\repop_test.txt");             // test override: "cooldown_min_s cooldown_max_s"
+        strcat_s(path, "scripts\\repop_test.txt");             // test override: "cooldown_min_s cooldown_max_s [part of a camp name, it takes the next attack]"
         if (fopen_s(&f, path, "r") == 0 && f) {
             float a = 0, b = 0;
-            if (fscanf_s(f, "%f %f", &a, &b) == 2 && a >= 0 && b >= a) { g_repopCooldownMin = a; g_repopCooldownMax = b; }
+            if (fscanf_s(f, "%f %f", &a, &b) == 2 && a >= 0 && b >= a) {
+                g_repopCooldownMin = g_repopAttackMin = a; g_repopCooldownMax = g_repopAttackMax = b;
+                if (fscanf_s(f, "%15s", g_repopFirstCamp, (unsigned)sizeof g_repopFirstCamp) != 1) g_repopFirstCamp[0] = 0;
+            }
             fclose(f);
-            LogLine("camp repopulation: test cooldown %.0f-%.0f s", g_repopCooldownMin, g_repopCooldownMax);
+            LogLine("camp repopulation: test cooldown %.0f-%.0f s%s%s", g_repopCooldownMin, g_repopCooldownMax, g_repopFirstCamp[0] ? ", next attack on " : "", g_repopFirstCamp);
         }
     }
 #endif

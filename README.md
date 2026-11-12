@@ -14,6 +14,19 @@ can't be found, the mod disables itself and says so.
 README inside explains installation, how it works, the F3/F4 keys and how to
 report problems.
 
+## World Repop (v0.9.3-beta1)
+
+The same plugin also puts enemies back into a cleared Wasteland (GOG build only; it switches itself off on any other executable):
+
+* **Camps** (24 scrap and fuel depots): after 30 to 60 minutes of game time a liberated camp is taken again. Its map icon shows as enemy
+  territory, and the enemies spawn as you get close to each spot. Kill them all and the civilians return. No structure, drummer or item
+  comes back, and saves always store the camp as liberated.
+* **Scavenging locations** (135) and **sniper towers** (35) bring their enemies back on the same timer.
+* **Road encounters** keep their rate when a region's threat is zero.
+
+The code is in `camp_repop.inc`, `loot_table.inc`, `sniper_table.inc` and `threat_diag.inc`. `MM_WORLD_REPOP` compiles it without the dev
+tools. Test override: `scripts\repop_test.txt` with `min max` cooldown seconds.
+
 ## How it works (short version)
 
 Vanilla marks a convoy as wrecked forever (`CConvoyDataContainer::m_Flags`
