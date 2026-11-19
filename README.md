@@ -54,7 +54,9 @@ in the research project this was built in; ask if you want it.
 * Visual Studio 2022 Build Tools with the C++ workload (MSVC v143), NuGet
   (`boost` package restored from `packages.config`).
 * Clone with submodules: `git clone --recursive ...` (`mm/` is
-  [gigaHours/mm_sdk](https://github.com/gigaHours/mm_sdk)).
+  [PabloCGSilva/mm_sdk](https://github.com/PabloCGSilva/mm_sdk), a fork of
+  [gigaHours/mm_sdk](https://github.com/gigaHours/mm_sdk) with a guarded
+  GOG build probe that `plugin.cpp` uses).
 * `MSBuild mm_plugin.sln /p:Configuration=Release /p:Platform=x64`
   produces `mm_ezstorm.asi` (rename as you like; any `.asi` in the game's
   `scripts` folder is loaded by the ASI loader).
