@@ -4,28 +4,30 @@ Makes destroyed convoys in Mad Max (2015, PC) come back — in the same play
 session, driven by the game's own logic, without touching the wreck, the
 hood ornament or the region Threat.
 
-**Status: public beta (v0.9.2-beta3).** Made and tested on the GOG build of
+**Status: public beta (v0.9.3-beta1, Enhanced Convoys + World Repop).** Made and tested on the GOG build of
 `AVAMain.exe` (2015-12-07). The game functions are found by byte signature,
 and since beta3 the mod waits for Steam's DRM to decrypt the executable before
 looking, so the Steam version should work too (not confirmed yet). If anything
 can't be found, the mod disables itself and says so.
 
 ➡ **Players: grab the zip from the [Releases](../../releases) page.** The
-README inside explains installation, how it works, the F3/F4 keys and how to
+README inside explains installation, how it works and how to
 report problems.
 
 ## World Repop (v0.9.3-beta1)
 
 The same plugin also puts enemies back into a cleared Wasteland (GOG build only; it switches itself off on any other executable):
 
-* **Camps** (24 scrap and fuel depots): after 30 to 60 minutes of game time a liberated camp is taken again. Its map icon shows as enemy
-  territory, and the enemies spawn as you get close to each spot. Kill them all and the civilians return. No structure, drummer or item
-  comes back, and saves always store the camp as liberated.
-* **Scavenging locations** (135) and **sniper towers** (35) bring their enemies back on the same timer.
+* **Camps** (31: scrap, fuel and food depots and the camps that guard a vehicle): every 20 to 40 minutes of game time the enemy takes back
+  a liberated camp away from the player (3 at most). A game message names it, its map icon shows as enemy territory, the enemies are back
+  when you arrive and a counter shows how many are left. Kill them all and the camp is retaken; the civilians return once you leave, and it
+  is safe for 30 to 60 minutes. The Top Dogs of Great Watcher and Large Blade come back as one more enemy; lookouts of a pulled-down tower
+  come back on the ground. No structure, drummer or item comes back, and saves always store the camp as liberated.
+* **Scavenging locations** (135), **sniper towers** (35, rebuilt) and **minefields** (30, mines buried again) come back on the same timer.
 * **Road encounters** keep their rate when a region's threat is zero.
 
-The code is in `camp_repop.inc`, `loot_table.inc`, `sniper_table.inc` and `threat_diag.inc`. `MM_WORLD_REPOP` compiles it without the dev
-tools. Test override: `scripts\repop_test.txt` with `min max` cooldown seconds.
+The code is in `camp_repop.inc` (with `camp_notice.inc` and the `*_table.inc` files) and `threat_diag.inc`. `MM_WORLD_REPOP` compiles it
+without the dev tools. Test override: `scripts\repop_test.txt` with `min max` cooldown seconds, then the camp codes to attack first.
 
 ## How it works (short version)
 

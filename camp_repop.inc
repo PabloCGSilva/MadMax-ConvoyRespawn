@@ -40,7 +40,10 @@ static const float REPOP_NO_SPAWN = 20.f;    // a spawned point with no entity t
 static const float REPOP_TRIGGER_WAIT = 20.f; // a point left to its own trigger, the last one alive: spawned by the mod after the player stays this long within REPOP_POINT
                                              // (sd1270 point A9E5B926 never spawns and stays on: the camp could never be cleared)
 static const float REPOP_LOST_RANGE = 200.f;  // a short life only counts this close to the point: farther the game despawns a healthy enemy as the player drives by (300 m, 10 points of sd1270 in the r8 test)
-static const int REPOP_MAX_LOST = 2;         // a point whose enemy vanished alive this many times, each within REPOP_NO_SPAWN of appearing, is switched off until the next repopulation
+static const float REPOP_LOOKOUT_FAR = 200.f; // a lookout point (370 m kind) farther than this from the camp centre is left to the game, not tracked (r43b autotest
+                                             // 2026-11-18: Black Cove's DF0DDFA9/41C6EC9B at 266/312 m never spawned, Overlook's D7B8EED9 at 228 m died out of
+                                             // REPOP_LOST_RANGE: both camps stayed taken with every enemy dead; the 24 older camps have none past 158 m)
+static const int REPOP_MAX_LOST = 2;        // a point whose enemy vanished alive this many times, each within REPOP_NO_SPAWN of appearing, is switched off until the next repopulation
                                              // (user test 2026-11-06: with the raised budget 5 points of sd1270/sd1290 gave enemies that lived 3-13 s, asked again without end)
 static const float REPOP_SPAWN = 180.f;      // the enemies are spawned only this close: the camp spawn points despawn at ~300 m, so
                                              // spawning them from farther (the enemy location streams at ~400 m) spawns them and the
@@ -53,7 +56,8 @@ static const float REPOP_SPAWN = 180.f;      // the enemies are spawned only thi
 // criers). Same order as g_camps (tools: world.bin entry whose path is the camp folder's main location).
 static const unsigned g_campBase[] = { 0x180ADBF7, 0x2D040BA1, 0x83BE25A8, 0x3F83775C, 0xF9BD88FD, 0x21B85061, 0x2BE27BE1, 0xDDAD9B47,
     0x8018A9C0, 0x8008BC49, 0x6A68D9E2, 0xC02B00B7, 0xC462A6F4, 0x8BFA79BB, 0x0E59D6EB, 0xDF5C7DED, 0xD3ECCCEA, 0x03C2A561, 0x211103FC,
-    0x04954B61, 0xC75D913A, 0x269F62CB, 0xEEC1F583, 0x7628D67A
+    0x04954B61, 0xC75D913A, 0x269F62CB, 0xEEC1F583, 0x7628D67A,
+    0x26FDD987, 0xFC6A241B, 0xC500C861, 0x2C2DE2B6, 0xF8046095, 0x7565F5EB, 0x7F694C70   // r43: vv1050_camp, fo2040, fo2020, vv2020, vv1110, vv1060, vv1080
 #if MM_DEV_TOOLS
     , 0x12DD44F1, 0x13D3757A, 0x77A8A17F, 0x61D964F9            // warchief camps: a01_wc1050, a02_wc2040, a01_wc1020_camp, a02_wc2020
 #endif
@@ -62,7 +66,10 @@ static_assert(sizeof g_campBase / sizeof g_campBase[0] == sizeof g_camps / sizeo
 // each camp's SLocationInfoEntry key (+0x30): global/location_info, the enemy camp entry nearest to the camp (1-105 m, next one 78 m or more away). Same order as g_camps.
 static const unsigned g_campLocKey[] = { 0x2CE4BEDC, 0x95976E7E, 0x1E87AF5B, 0x2DBB8962, 0x2364BD26, 0x03B743E8, 0xEE19845B, 0x634385C1,
     0x7E96D6EF, 0xD9FF1A87, 0x9E91F414, 0xFB392F66, 0xDB279FE8, 0x7544C6BD, 0xADEF4EF9, 0xE57A49A2, 0xB350D06A, 0xA4E3AA6B, 0x3A374C69,
-    0x525AE42F, 0x7BE7AA6A, 0x8F1B437F, 0xD65FD680, 0xB9A15A77
+    0x525AE42F, 0x7BE7AA6A, 0x8F1B437F, 0xD65FD680, 0xB9A15A77,
+    // r43: Overlook (107 m), Skull Top, Havoc Point, Twin Sisters, Scorched Sand, Jugular Canyon (96 m: the nearer entry, 62 m, is
+    // Debris Site, type 9, no camp), Black Cove
+    0xB8BA74D8, 0xFC107996, 0x6A92820A, 0x83D3B23F, 0x3CAD37C2, 0x401765F4, 0x3B66AA1A
 #if MM_DEV_TOOLS
     , 0x25B1896C, 0xE2DC276D, 0xBABF660A, 0xFBCB4761            // warchief camps
 #endif
@@ -111,10 +118,14 @@ static bool CampItemsDone(int i) {
 // Warchiefs (warchief camps): 0x93C5A6FE wc1050 Gut Noose, 0xC1238E96 wc2040 Pig n Sticker, 0x897C8F67 wc1020 Gaspa Grope,
 // 0x582F2735 wc2020 Cocka Locka. Test switch: <game>\scripts\repop_topdogs.txt brings them back too (g_topDogsBack); when one is
 // killed the game re-runs the camp completion and switches the enemy location off -> the camp goes to CLEARED (civilians return).
-static const unsigned g_topDogSpawnPoints[] = { 0x583D5194 /* sd1300 Stump Grinder */, 0xD73AB55E /* sd1210 Rim Jobbie */,
+// r46: Rim Jobbie was 0xD73AB55E, an id no spawn point has (user test 2026-11-19: he was counted as a plain enemy, D73B025E)
+static const unsigned g_topDogSpawnPoints[] = { 0x583D5194 /* sd1300 Stump Grinder */, 0xD73B025E /* sd1210 Rim Jobbie */,
     0x93C5A6FE, 0xC1238E96, 0x897C8F67, 0x582F2735 };
-static bool g_topDogsBack = false;
-static bool IsTopDog(unsigned id) { if (g_topDogsBack) return false; for (unsigned t : g_topDogSpawnPoints) if (t == id) return true; return false; }
+// r44 (user 2026-11-18: "sim os top dogs devem voltar. apenas cuidar para que a morte deles não conte como um trigger para a retomada"):
+// they come back by default; their death is one more kill of the mod's count, and its completion events are dropped (EventSend_hook)
+static bool g_topDogsBack = true;
+static bool TopDogPoint(unsigned id) { for (unsigned t : g_topDogSpawnPoints) if (t == id) return true; return false; }
+static bool IsTopDog(unsigned id) { return !g_topDogsBack && TopDogPoint(id); }
 
 // War Criers: the tower is a CDestructibleObject "dmg_parent" (with its CLightCharacter "operator", save=0) in the camp's base
 // location, created by its own CSpawnPoint (spawn distance 350, the tower in its object list B6B07728); camp completion switches that
@@ -152,19 +163,44 @@ enum RepopState { RP_IDLE = 0, RP_PENDING, RP_ACTIVE, RP_CLEARED };
 static const char* RP_NAMES[] = { "idle", "pending", "active", "cleared" };
 struct RepopCamp { int state; float cooldown; bool revived; int revivedCount; unsigned revivedIds[32]; bool forced; bool cycleStarted;
                    int baseCount; unsigned baseIds[16]; bool baseDone; float baseWait;
-                   int towerCount; unsigned towerIds[4]; unsigned spawnedMask;
+                   float baseNoLive[16]; uint8_t baseLost[16]; unsigned baseIgnored;   // per base guard: seconds with no enemy / asked again / not counted
+                   int towerCount; unsigned towerIds[16]; unsigned spawnedMask;   // lookout tower parts (diagnostic)
                    unsigned liveMask; unsigned ignoredMask; float noLive[32];   // per tracked point: had an entity / never spawns / seconds with no entity
                    float liveTime[32]; uint8_t lost[32];                        // per tracked point: seconds its current entity has been there / short lives so far
                    int deadCount; unsigned deadIds[48]; bool armed;             // killed in this repopulation (kept when the player leaves and returns); 370 m points done
-                   unsigned lookoutMask; };                                     // tracked points that are lookouts (spawn distance over 100 m): the game spawns them, see SpawnEntityChars
+                   unsigned lookoutMask;                                        // tracked points that are lookouts (spawn distance over 100 m): the game spawns them, see SpawnEntityChars
+                   unsigned topDog; };                                          // r44: the camp's Top Dog spawn point, tracked like the others (0: none)
 static volatile LONG g_repopSaving;   // set while the save hook has the flags flipped (the save may run on another thread)
 static RepopCamp g_repop[sizeof g_camps / sizeof g_camps[0]];
 static bool RepopIsDead(const RepopCamp& r, unsigned id) {
     for (int i = 0; i < r.deadCount; i++) if (r.deadIds[i] == id) return true;
     return false;
 }
+// r46 (user test 2026-11-19, Large Blade: "ao derrotar o top dog, as manivelas para desligar o fogo da arena não ficaram disponíveis,
+// então fiquei preso"): the Top Dog intro (a01_sd1210_spawn evt.skipped / its sequence) lights the arena's two flame pipes; the valves
+// (evt.action) put them out with a01_sd1210.flame_pipe_{left,right}.off (A980C7AF / D6D84B89, Jenkins confirmed), which the base
+// location's EventTrigger_FlameOff objects listen to. Why the valves were not usable is not known; the mod sends the same events when
+// the Top Dog dies. SendMsg turns each name into SEventID(hash, 0), the same id the valves send.
+static const struct { const char* camp; const char* events; } g_topDogArenaOff[] = {
+    { "sd1210", "a01_sd1210.flame_pipe_left.off a01_sd1210.flame_pipe_right.off" },
+};
+static const uintptr_t A_SendEventMsg = 0x140007CA0;   // NEvent::CSendEvent<...>::SendMsg(const char*)
+static void TopDogArenaOff(int i, const char* why) {
+    for (auto& a : g_topDogArenaOff) {
+        if (!strstr(g_camps[i].name, a.camp)) continue;
+        bool ok = true;
+        __try { ((void (*)(const char*))A_SendEventMsg)(a.events); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+        LogLine("CAMPREPOP %s: %s -> arena flames %s (%s)", g_camps[i].name, why, ok ? "switched off" : "NOT switched off, the call failed", a.events);
+    }
+}
 static void RepopRememberDead(RepopCamp& r, unsigned id) {
-    if (!RepopIsDead(r, id) && r.deadCount < 48) r.deadIds[r.deadCount++] = id;
+    if (RepopIsDead(r, id)) return;
+    if (r.deadCount < 48) r.deadIds[r.deadCount++] = id;
+    if (id && id == r.topDog) {
+        int i = (int)(&r - g_repop);
+        LogLine("CAMPREPOP %s: Top Dog %08X dead", g_camps[i].name, id);
+        TopDogArenaOff(i, "Top Dog dead");
+    }
 }
 static void RepopTrackLookout(RepopCamp& r, unsigned id) {
     if (r.revivedCount < 32) { r.lookoutMask |= 1u << r.revivedCount; r.revivedIds[r.revivedCount++] = id; }
@@ -271,12 +307,17 @@ typedef void (*EventSendFn)(void*, void*);
 static EventSendFn EventSend_orig = nullptr;
 static const unsigned g_topDogCompletion[] = { 0x868D48E1, 0x400BC781, 0xB2F680F5, 0x4B8A1508, 0xCD9CA9DC, 0x870DD82C };
 static volatile LONG g_topDogBlocked = 0;
-static bool AnyCampRepopulated() {
-    for (auto& r : g_repop) if (r.state == RP_PENDING || r.state == RP_ACTIVE) return true;
+// r44: only while a held camp whose Top Dog is back has the player within REPOP_LOAD (the events carry no camp: the first liberation of
+// another Top Dog camp must still complete; the 2026-10-16 filter dropped them whenever any camp was held)
+static bool TopDogCampHeldNear() {
+    for (int i = 0; i < (int)(sizeof g_camps / sizeof g_camps[0]); i++) {
+        const RepopCamp& r = g_repop[i];
+        if (r.topDog && (r.state == RP_PENDING || r.state == RP_ACTIVE) && CampDistance(g_camps[i]) <= REPOP_LOAD) return true;
+    }
     return false;
 }
 static void EventSend_hook(void* e, void* data) {
-    if (g_topDogsBack && AnyCampRepopulated()) {
+    if (g_topDogsBack && TopDogCampHeldNear()) {
         unsigned a = 0, b = 0;
         __try { a = *(const unsigned*)((uint8_t*)e + 8); b = *(const unsigned*)((uint8_t*)e + 0xC); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         for (unsigned h : g_topDogCompletion)
@@ -289,7 +330,8 @@ static void EventSend_hook(void* e, void* data) {
 }
 static bool g_repopInit;
 static float g_repopAttackIn;                 // game seconds to the next attack; stopped while REPOP_MAX_TAKEN camps are held
-static char g_repopFirstCamp[16];             // test: third field of repop_test.txt, part of a camp name: it takes the next attack as soon as it can fall
+static char g_repopFirstCamp[8][16];          // test: third field onwards of repop_test.txt, parts of camp names: each attack takes the first listed camp that can fall
+static int g_repopFirstN;                     // (r43d: a list, user 2026-11-18 "ajuste para esses acampamentos sejam atacados antes"); a name leaves the list once it fell
 static int g_repopTotal;
 
 static bool SafeSpawn(uint8_t* sp) { __try { ((LocFn)A_SpawnPointSpawn)(sp); return true; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; } }
@@ -341,10 +383,114 @@ static int LocSpawnPoints(unsigned locId, uint8_t** out, unsigned* ids, int max)
     return -1;
 }
 
+// Lookout towers. Gob Stone's lookout F408814D died from a fall 2 s after every spawn (autotests A, B, C and the user's r32 test;
+// POINTDIAG: CPfxRigidBodyCharacterInstance::ProcessHitInfos -> CCharacter::DoReactToHit -> InflictDamage): it stands on a sniper tower
+// of the base location (platform AA30074E 1.2 m under it, pylons, skull, chain, jaw), pulled down in the save, and spawns in the air.
+// 16 of the 24 camps have such towers (tools/aibt/lookout_towers.py). Rebuilding the tower does not hold: its state lives in a
+// CEventRouter of the base location (save=1; Gob Stone's 3381362438: in 9A30265F from the CCreationTrigger when the location is created,
+// switch EB9E3BB3 = the tower fell, out C6B60C08 = the disable event of every tower part) that switches the parts off again on every
+// load (r34, r35diag), and with the player near the game breaks a rebuilt tower again (r36 rebuilt it every second: a destruction
+// animation in a loop, user test 2026-11-15). r37: the user saw the lookouts of Dead End and Hell's Grill (short towers) come back on
+// the ground where the tower stood, so a lookout whose platform is down (not enabled, or broken) is moved to the ground before it
+// spawns: its spawn point's transform (+0x128, read by CSpawnPoint::Spawn) gets the height of the first static surface under it, or the
+// terrain's. Spawn points are not saved: a location loaded again has the file's position, moved again then.
+#include "lookout_tower_table.inc"
 static void TowersForCycle(int i) {
     RepopCamp& r = g_repop[i];
     r.towerCount = 0;
-    for (auto& w : g_warCriers) if (w.camp == i && r.towerCount < 4) r.towerIds[r.towerCount++] = w.tower;
+    for (auto& t : g_lookoutTowers)
+        if (t.camp == i)
+            for (unsigned p : t.parts) if (p && r.towerCount < 16) r.towerIds[r.towerCount++] = p;
+}
+typedef void (*DestructibleFn)(void*);
+static bool SafeParts(uint8_t* obj) {
+    __try { ((DestructibleFn)A_DestructibleDisableParts)(obj); ((DestructibleFn)A_DestructibleEnableParts)(obj); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// a game object or one of its children (m_Children +0x90, shared_ptr pairs) by runtime id, a few levels down
+static uint8_t* FindInTree(uint8_t* go, unsigned id, int depth) {
+    if (!go) return nullptr;
+    __try {
+        if (*(const unsigned*)(go + 0x14) == id) return go;
+        if (depth <= 0) return nullptr;
+        uint8_t* const* b = *(uint8_t* const* const*)(go + 0x90); uint8_t* const* e = *(uint8_t* const* const*)(go + 0x98);
+        if (!b || e < b || e - b > 2 * 512) return nullptr;
+        for (uint8_t* const* it = b; it < e; it += 2)
+            if (uint8_t* f = FindInTree(*it, id, depth - 1)) return f;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return nullptr;
+}
+// a loaded object of the given locations (FindLocations) by runtime id: the location's object container +0x20 -> +0x20, shared_ptr pairs
+static uint8_t* FindInLocations(uint8_t* const* l, int n, unsigned id) {
+    for (int k = 0; k < n; k++) {
+        __try {
+            const uint8_t* cont = *(const uint8_t* const*)(l[k] + 0x20);
+            const uint8_t* oc = cont ? *(const uint8_t* const*)(cont + 0x20) : nullptr;
+            if (!oc) continue;
+            uint8_t* const* b = *(uint8_t* const* const*)oc; uint8_t* const* e = *(uint8_t* const* const*)(oc + 8);
+            if (!b || e < b || e - b > 2 * 5000) continue;
+            for (uint8_t* const* it = b; it < e; it += 2)
+                if (uint8_t* go = FindInTree(*it, id, 6)) return go;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    return nullptr;
+}
+static const uintptr_t A_TerrainHeight = 0x14078BCF0;         // CTerrainMapBase::GetBilinearHeight(const CVector3f&)
+static const uintptr_t A_GroundBelow = 0x14057FD40;           // CAirVehicle::GetGroundHeight_Expensive: a static-only ray from y + 1 down to the terrain
+static const uintptr_t A_TerrainInstance = 0x141711D10;       // CAvaSingle<CTerrainMapBase>::Instance
+static const int LOOKOUT_N = sizeof g_lookoutPlatforms / sizeof g_lookoutPlatforms[0];
+static uint8_t* g_lookoutPlatGo[LOOKOUT_N];                   // where each platform was last found loaded (checked by its id before use)
+static float g_lookoutLowY[LOOKOUT_N];                        // the height each point was moved to (0: not moved)
+static bool g_lookoutNoPlat[LOOKOUT_N];                       // "platform not loaded" logged
+// the ground under p: the first static surface below the platform if it is not under the terrain, else the terrain
+static bool LookoutGround(const float* p, float* ground, float* terrain, float* ray) {
+    __try {
+        const void* t = *(const void* const*)A_TerrainInstance;
+        if (!t) return false;
+        float q[3] = { p[0], 0.f, p[2] };
+        *terrain = ((float (*)(const void*, const float*))A_TerrainHeight)(t, q);
+        q[1] = p[1] - 3.f;                                    // the ray starts 1 m higher: under the platform
+        *ray = ((float (*)(const float*))A_GroundBelow)(q);
+        *ground = *ray > *terrain - 1.f && *ray < p[1] - 2.5f ? *ray : *terrain;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// every second while the camp's enemy location is loaded (sp / ids: its spawn points); moved again if the ground found later is higher
+// (static collision streamed in after the first look)
+static void LookoutsToGround(int i, uint8_t* const* sp, const unsigned* ids, int n) {
+    uint8_t* l[4]; int nl = -1;
+    for (int e = 0; e < LOOKOUT_N; e++) {
+        if (g_lookoutPlatforms[e].camp != i) continue;
+        int k = 0;
+        while (k < n && ids[k] != g_lookoutPlatforms[e].lookout) k++;
+        if (k >= n) continue;
+        float* p = (float*)(sp[k] + 0x128 + 0x30);
+        float y;
+        __try { y = p[1]; } __except (EXCEPTION_EXECUTE_HANDLER) { continue; }
+        uint8_t* go = g_lookoutPlatGo[e];
+        bool same = false;
+        if (go) __try { same = *(const unsigned*)(go + 0x14) == g_lookoutPlatforms[e].platform; } __except (EXCEPTION_EXECUTE_HANDLER) { same = false; }
+        if (!same) {
+            if (nl < 0) nl = FindLocations(g_campBase[i], l, 4);
+            go = g_lookoutPlatGo[e] = nl > 0 ? FindInLocations(l, nl, g_lookoutPlatforms[e].platform) : nullptr;
+            if (!go) {
+                if (!g_lookoutNoPlat[e]) LogLine("CAMPREPOP %s: lookout %08X: its tower platform %08X is not loaded, the point is left where it is", g_camps[i].name, ids[k], g_lookoutPlatforms[e].platform);
+                g_lookoutNoPlat[e] = true;
+                continue;
+            }
+        }
+        uint8_t flags;
+        __try { flags = go[0x238]; } __except (EXCEPTION_EXECUTE_HANDLER) { g_lookoutPlatGo[e] = nullptr; continue; }
+        if ((flags & 0x08) && !(flags & (0x01 | 0x10))) continue;   // the tower stands
+        float ground, terrain, ray;
+        if (!LookoutGround(p, &ground, &terrain, &ray)) continue;
+        bool moved = g_lookoutLowY[e] != 0.f && fabsf(y - g_lookoutLowY[e]) < 0.01f;
+        if (moved ? ground + 0.3f - y < 0.5f : y - ground < 2.f) continue;   // on the ground already (a short drop: not moved)
+        p[1] = ground + 0.3f;
+        g_lookoutLowY[e] = p[1];
+        LogLine("CAMPREPOP %s: lookout %08X: its tower is down (platform %08X flags %02X), spawn point moved to the ground (y %.1f -> %.1f; terrain %.1f, static ray %.1f)",
+            g_camps[i].name, ids[k], g_lookoutPlatforms[e].platform, flags, y, p[1], terrain, ray);
+    }
 }
 
 // the camp's name in the game's language, "" if it cannot be read
@@ -362,11 +508,45 @@ static const char* CampTitle(int i) {
     return title ? title : "";
 }
 
+// r39 (2026-11-15, r38diag autotests F: Finger Peak sd1240 completed by the game when the first scav of a repopulated camp died, 10
+// alive; the same class as Gob Stone retaken with no fight, sd1270 / sd1290 on 2026-11-06 and Hollow Point): a scav's death event
+// (Finger Peak's 8C0DC183) runs location_info_complete_objective_picked_location.gsr, which counts the objective's tracked items, finds
+// them done (the save has the camp liberated) and sends 2939A218; that starts the camp's completion graph gsr.fuel_cam_control
+// (fuel_center_cam_control.gsr), whose Timer despawns every enemy (72EDE02F) and switches the enemy location off (6E8F303A ->
+// 673228D7) 1.8 s later. Every camp has one (tools/aibt/camp_completion_table.py). While a camp is held its completion graph's events
+// are dropped: the mod's own count retakes the camp (CampRetaken)
+#include "camp_completion_table.inc"
+static const uintptr_t A_GraphScriptHandleEvent = 0x1402B2DA0;   // CGraphScriptGameObject::HandleEvent (this = object + 0xD0)
+static volatile LONG g_completionLines;
+DEFHOOK(void, GraphScriptHandleEvent, (uint8_t* self, const uint8_t* impl, const void* data)) {
+    if (g_repopInit) {
+        unsigned id = 0, idAlt = 0;
+        __try { id = *(const unsigned*)(self - 0xD0 + 0x14); idAlt = *(const unsigned*)(self - 0xD0 + 8 + 0x14); } __except (EXCEPTION_EXECUTE_HANDLER) { id = idAlt = 0; }
+        for (auto& g : g_campCompletion) {
+            if (g.graph != id && g.graph != idAlt) continue;
+            int st = g_repop[g.camp].state;
+            if (st != RP_PENDING && st != RP_ACTIVE) break;
+            if (InterlockedIncrement(&g_completionLines) <= 40) {
+                unsigned h = 0;
+                __try { h = *(const unsigned*)(impl + 0xC); } __except (EXCEPTION_EXECUTE_HANDLER) { h = 0; }
+                LogLine("CAMPREPOP %s: the game's camp completion ignored (graph %08X%s, event %08X): the camp is held", g_camps[g.camp].name, g.graph,
+                    g.graph == id ? "" : " at +8", h);
+            }
+            return;
+        }
+    }
+    GraphScriptHandleEvent_orig(self, impl, data);
+}
+
 // the player beat the camp: the game's own completion screen does not run for a repopulated camp, the notice stands in for it
 static void CampRetaken(int i) {
     const char* title = CampTitle(i);
-    CampNoticeShow("Camp retaken", title, NOTICE_MS);
-    LogLine("CAMPREPOP %s: notice shown (camp retaken, \"%s\")", g_camps[i].name, title);
+    char line[96];
+    snprintf(line, sizeof line, title[0] ? "%s retaken" : "Camp retaken", title);
+    bool native = NativeMessage(line, "Camp retaken", title);
+    if (!native) CampNoticeShow("Camp retaken", title, NOTICE_MS);
+    LogLine("CAMPREPOP %s: notice shown (camp retaken, \"%s\"%s)", g_camps[i].name, title, native ? ", game message" : "");
+    if (g_repop[i].topDog && !RepopIsDead(g_repop[i], g_repop[i].topDog)) TopDogArenaOff(i, "camp retaken without the Top Dog's death");
 }
 
 // the camp fell: the player reads which one while driving, without opening the map (user 2026-11-06)
@@ -374,9 +554,11 @@ static void CampAttacked(int i) {
     const char* title = CampTitle(i);
     if (!title[0]) return;
     char line[64];
-    snprintf(line, sizeof line, "%s was attacked by Scrotus", title);
-    bool queued = CampNoticeQueue(line, "Retake it");
-    LogLine("CAMPREPOP %s: notice %s (camp attacked, \"%s\")", g_camps[i].name, queued ? "queued" : "dropped, queue full", title);
+    // not "by Scrotus": some camps are taken by Roadkill raiders (user 2026-11-13)
+    snprintf(line, sizeof line, "Enemies attacked %s", title);
+    bool native = NativeMessage(line, line, "Retake it");
+    bool queued = native || CampNoticeQueue(line, "Retake it");
+    LogLine("CAMPREPOP %s: notice %s (camp attacked, \"%s\"%s)", g_camps[i].name, queued ? "queued" : "dropped, queue full", title, native ? ", game message" : "");
 }
 
 // the camp's enemies are gone: its enemy location goes off now; the civilians come back later, when the player is away (RP_CLEARED)
@@ -389,6 +571,7 @@ static void RepopRestore(int i, const char* why) {
         for (int j = 0; j < g_repop[i].baseCount; j++) if (bids[k] == g_repop[i].baseIds[j]) bsp[k][0x232] = 0;
     g_repop[i].state = RP_CLEARED; g_repop[i].revived = false; g_repop[i].revivedCount = 0; g_repop[i].forced = false; g_repop[i].cycleStarted = false;
     g_repop[i].baseCount = 0; g_repop[i].baseDone = false; g_repop[i].towerCount = 0; g_repop[i].deadCount = 0; g_repop[i].armed = false;
+    g_repop[i].baseIgnored = 0; memset(g_repop[i].baseNoLive, 0, sizeof g_repop[i].baseNoLive); memset(g_repop[i].baseLost, 0, sizeof g_repop[i].baseLost);
     LogLine("CAMPREPOP %s: %s -> enemy location off, civilians return when the player is %.0f m away", c.name, why, REPOP_CIV_BACK);
 }
 static void RepopCiviliansBack(int i) {
@@ -609,6 +792,183 @@ static void SniperTick(float step) {
         LogLine("SNIPEREPOP %s: player %.0f m away, sniper %s on the %s%s; harpoon targets %d found, %d were on, %d enabled; next in %.0f min",
             e.name, d, ok ? "spawned" : "FAILED", sp == o[1] ? "tower" : "ground", s.towerRestored ? " (tower rebuilt)" : towerDown ? " (tower down)" : "",
             tFound, tOn, targets, s.cd / 60.f);
+    }
+}
+
+// ---- minefields (2026-11-13) ------------------------------------------------------------------------------------------------------
+// A minefield (aXX_minefield_*, .nl part only, no enemies) has 3 buried mines. Each mine has a saved CEventRouter that starts at 1
+// (property B1A41FF8: mine active) and goes to 0 once the mine is disarmed or explodes; on creation the location asks it and the mine
+// comes up active or removed. A fourth router goes 1 -> 0 when the CountTrigger counted the 3 mines (the field is cleared). The
+// CountTrigger and the 3 loot bags (the scrap of a disarmed mine) are saved too. The world map's progress is kept elsewhere
+// (LocationInfoCompleteTrackedItem counts down per item type and stops at 0), so only a field the mod saw cleared comes back:
+// re-arming an unfinished one would let the player finish it by disarming the same mine again. Cycle: cleared seen (completion
+// router 0 while loaded) -> cooldown (same as the camps) -> armed once the player is past the stream-out radius -> on the next
+// stream-in the Load hooks keep the fresh values of the table objects: the mines are buried again and the dog has to find them.
+// The map stays cleared.
+#include "minefield_table.inc"
+static const int MF_N = sizeof g_minefields / sizeof g_minefields[0];
+static const uintptr_t A_RouterLoad = 0x1403E18F0;              // CEventRouter::Load(const CSaveContext&): one saved bit -> go+0xE8
+static const uintptr_t A_CountTriggerLoad = 0x1405704F0;        // CCountTrigger::Load: count +0xE8, bit 0x02 of +0x160
+static const uintptr_t A_LootBagLoad = 0x140310E70;             // CLootBag::Load: +0x170
+#define MF_DIAG 0   // 1 = the r30 MINEDIAG lines (router bit changes with their callers, the bits saved on unload and loaded back)
+struct MinefieldState { float cd; bool cleared, armed, seen; int reset; float loadedFor; };
+static MinefieldState g_mf[MF_N];
+static int g_mfRevivedTotal;
+#if MM_DEV_TOOLS || MM_AUTOTEST
+static int g_mfAutoClear = -1; static float g_mfAutoWait;       // autotest "mines": the nearest field is marked cleared once loaded
+#endif
+static float MinefieldDistance(const MinefieldEntry& e) { float dx = g_PlayerPos.x - e.x, dz = g_PlayerPos.z - e.z; return sqrtf(dx * dx + dz * dz); }
+// the minefield an object belongs to (only an armed one if armedOnly): 0 completion router, 1 count trigger, 2 mine router, 3 loot bag
+static int MinefieldObject(unsigned id, int* kind, bool armedOnly = true) {
+    if (!id || !g_repopInit) return -1;
+    for (int i = 0; i < MF_N; i++) {
+        if (armedOnly && !g_mf[i].armed) continue;
+        const MinefieldEntry& e = g_minefields[i];
+        if (id == e.done) { *kind = 0; return i; }
+        if (id == e.count) { *kind = 1; return i; }
+        for (int k = 0; k < 3; k++) {
+            if (id == e.mines[k]) { *kind = 2; return i; }
+            if (id == e.loot[k]) { *kind = 3; return i; }
+        }
+    }
+    return -1;
+}
+DEFHOOK(void, RouterLoad, (uint8_t* go, void* ctx)) {
+    unsigned id = 0; uint8_t fresh = 0;
+    __try { id = *(const unsigned*)(go + 0x14); fresh = go[0xE8]; } __except (EXCEPTION_EXECUTE_HANDLER) { id = 0; }
+    RouterLoad_orig(go, ctx);
+    int kind, i = MinefieldObject(id, &kind);
+    if (i < 0) {   // r30 diagnostic: what the save storage holds when a field that is not armed streams in
+#if MF_DIAG
+        int any = MinefieldObject(id, &kind, false);
+        if (any >= 0) LogLine("MINEDIAG %s: %s router %08X loaded %d from the save", g_minefields[any].name, kind == 0 ? "completion" : "mine", id, go[0xE8]);
+#endif
+        return;
+    }
+    uint8_t saved = go[0xE8];
+    go[0xE8] = fresh;
+    g_mf[i].reset++;
+    LogLine("MINEREPOP %s: %s router %08X saved %d, kept %d", g_minefields[i].name, kind == 0 ? "completion" : "mine", id, saved, fresh);
+}
+DEFHOOK(void, CountTriggerLoad, (uint8_t* go, void* ctx)) {
+    unsigned id = 0; int fresh = 0; uint8_t freshBits = 0;
+    __try { id = *(const unsigned*)(go + 0x14); fresh = *(const int*)(go + 0xE8); freshBits = go[0x160]; } __except (EXCEPTION_EXECUTE_HANDLER) { id = 0; }
+    CountTriggerLoad_orig(go, ctx);
+    int kind, i = MinefieldObject(id, &kind);
+    if (i < 0) return;
+    int saved = *(const int*)(go + 0xE8); uint8_t savedBits = go[0x160];
+    *(int*)(go + 0xE8) = fresh; go[0x160] = freshBits;
+    g_mf[i].reset++;
+    LogLine("MINEREPOP %s: count trigger %08X saved %d (flags %02X), kept %d (flags %02X)", g_minefields[i].name, id, saved, savedBits, fresh, freshBits);
+}
+DEFHOOK(void, LootBagLoad, (uint8_t* go, void* ctx)) {
+    unsigned id = 0, fresh = 0;
+    __try { id = *(const unsigned*)(go + 0x14); fresh = *(const unsigned*)(go + 0x170); } __except (EXCEPTION_EXECUTE_HANDLER) { id = 0; }
+    LootBagLoad_orig(go, ctx);
+    int kind, i = MinefieldObject(id, &kind);
+    if (i < 0) return;
+    unsigned saved = *(const unsigned*)(go + 0x170);
+    *(unsigned*)(go + 0x170) = fresh;
+    g_mf[i].reset++;
+    LogLine("MINEREPOP %s: loot bag %08X saved %u, kept %u", g_minefields[i].name, id, saved, fresh);
+}
+
+#if MF_DIAG
+// r30 diagnostic (Pablo's r29 tests 2026-11-13: the mines came back 3 of 3 active, then the field was cleared again once while he
+// drove in and once while he was away). Logs every change of a table router's bit with the player's distance and the exe return
+// addresses on the stack (resolve with pdb_symbols.json), and the bit each router has when its location unloads. Result 2026-11-14:
+the reset bits are saved on unload and loaded back; every 1 -> 0 came from CInteractionGraph::SendOnLeaveEvent (the player's
+pliers) and the completion router from CCountTrigger::OnUp, i.e. the r29 'cleared again' was the player clearing the field.
+static const uintptr_t A_RouterHandleEvent = 0x1403EA8D0;       // CEventRouter::HandleEvent(event, data): this = go + 0xD0, bit at +0x18
+static const uintptr_t A_SaveOnDestroy = 0x1403B1820;           // CGameWorld::SaveGameObjectOnDestroy(go): Save() as an object leaves the world
+static void ExeCallers(char* out, size_t n) {
+    void* f[16];
+    USHORT c = RtlCaptureStackBackTrace(2, 16, f, NULL);
+    size_t len = 0; out[0] = 0;
+    for (USHORT k = 0; k < c && len + 12 < n; k++) {
+        uintptr_t a = (uintptr_t)f[k];
+        if (a >= 0x140000000ull && a < 0x141AA8000ull) len += snprintf(out + len, n - len, " %llX", (unsigned long long)a);
+    }
+}
+DEFHOOK(void, RouterHandleEvent, (uint8_t* h, const void* ev, const void* data)) {
+    unsigned id = 0; uint8_t before = 0;
+    __try { id = *(const unsigned*)(h - 0xD0 + 0x14); before = h[0x18]; } __except (EXCEPTION_EXECUTE_HANDLER) { id = 0; }
+    RouterHandleEvent_orig(h, ev, data);
+    int kind, i = MinefieldObject(id, &kind, false);
+    if (i < 0 || h[0x18] == before) return;
+    char callers[200]; ExeCallers(callers, sizeof callers);
+    LogLine("MINEDIAG %s: %s router %08X %d -> %d, player %.0f m away; callers%s", g_minefields[i].name, kind == 0 ? "completion" : "mine", id,
+        before, h[0x18], MinefieldDistance(g_minefields[i]), callers);
+}
+DEFHOOK(void, SaveOnDestroy, (void* world, uint8_t* go)) {
+    unsigned id = 0;
+    __try { id = *(const unsigned*)(go + 0x14); } __except (EXCEPTION_EXECUTE_HANDLER) { id = 0; }
+    int kind, i = MinefieldObject(id, &kind, false);
+    if (i >= 0 && kind != 3)
+        LogLine("MINEDIAG %s: %s %08X leaves the world with %d, player %.0f m away", g_minefields[i].name,
+            kind == 0 ? "completion router" : kind == 1 ? "count trigger" : "mine router", id, kind == 1 ? *(const int*)(go + 0xE8) : go[0xE8],
+            MinefieldDistance(g_minefields[i]));
+    SaveOnDestroy_orig(world, go);
+}
+#endif
+
+static void MinefieldTick(float step) {
+    for (int i = 0; i < MF_N; i++) {
+        const MinefieldEntry& e = g_minefields[i]; MinefieldState& s = g_mf[i];
+        float d = MinefieldDistance(e);
+        if (s.cd > 0.f) s.cd -= step;
+        if (d > e.loadR + 30.f) { s.seen = false; s.loadedFor = 0.f; }
+#if MM_DEV_TOOLS || MM_AUTOTEST
+        // a field cleared in the save is not marked again (autotest 2026-11-13: the pending mark waited and hit the field once it came back)
+        if (g_mfAutoClear == i && s.cleared) { g_mfAutoClear = -1; LogLine("AUTOTEST mines %s: already cleared, nothing to mark", e.name); }
+#endif
+        if (s.armed && d > e.loadR + 30.f) continue;
+        if (!s.armed && s.cleared) {
+            if (s.cd <= 0.f && d > e.unloadR + 50.f) {
+                s.armed = true; s.reset = 0; s.loadedFor = 0.f;
+                LogLine("MINEREPOP %s: armed (player %.0f m away): the mines come back when the field loads again", e.name, d);
+            }
+            continue;
+        }
+        if (d > e.loadR + 30.f) continue;
+        const unsigned want[5] = { e.done, e.mines[0], e.mines[1], e.mines[2], e.count };
+        uint8_t* o[5];
+        if (LocObjects(e.id, want, 5, o) < 0 || !o[0]) { s.loadedFor = 0.f; continue; }   // not loaded
+        s.loadedFor += step;
+        if (s.loadedFor < 3.f) continue;                            // after the location's own creation events
+        int active = 0, count = 0; uint8_t done = 1;
+        __try {
+            done = o[0][0xE8];
+            for (int k = 1; k <= 3; k++) active += o[k] && o[k][0xE8];
+            if (o[4]) count = *(const int*)(o[4] + 0xE8);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { continue; }
+#if MM_DEV_TOOLS || MM_AUTOTEST
+        if (g_mfAutoClear == i) {   // as if the 3 mines were disarmed: the routers and the counter as the game leaves them
+            g_mfAutoClear = -1;
+            __try { o[0][0xE8] = 0; for (int k = 1; k <= 3; k++) if (o[k]) o[k][0xE8] = 0; if (o[4]) *(int*)(o[4] + 0xE8) = 3; }
+            __except (EXCEPTION_EXECUTE_HANDLER) {}
+            LogLine("AUTOTEST mines %s: marked cleared (was: completion router %d, %d of 3 mines active, count %d)", e.name, done, active, count);
+            continue;
+        }
+#endif
+        if (s.armed) {
+            s.armed = false; s.cleared = false; s.seen = true; s.cd = RandCooldown();
+            if (s.reset) g_mfRevivedTotal++;
+            LogLine("MINEREPOP %s: %s (%d saved objects reset; now completion router %d, %d of 3 mines active, count %d), player %.0f m away; next in %.0f min at the earliest",
+                e.name, s.reset ? "mines back" : "loaded with no saved state to reset", s.reset, done, active, count, d, s.cd / 60.f);
+            continue;
+        }
+        bool firstSight = !s.seen;
+        if (firstSight) {
+            s.seen = true;
+            LogLine("MINEREPOP %s: loaded, %s (completion router %d, %d of 3 mines active, count %d), player %.0f m away", e.name,
+                done ? "not cleared yet" : "cleared", done, active, count, d);
+        }
+        if (!done && !s.cleared) {
+            s.cleared = true;
+            if (!firstSight) s.cd = RandCooldown();                 // cleared just now: the full cooldown from here
+            LogLine("MINEREPOP %s: cleared; the mines come back after %.0f min at the earliest, once you are %.0f m away", e.name, s.cd > 0.f ? s.cd / 60.f : 0.f, e.unloadR + 50.f);
+        }
     }
 }
 
@@ -1069,15 +1429,315 @@ static void CampDiagTick(float step) {
 }
 #endif
 
-// the camp falls: the enemy location on and the civilians off, out of the player's sight
-static void RepopAttack(int i, float d) {
+// One-off repair of Pablo's save (user 2026-11-14: Gasworks shown as taken, no enemies). The wcdrum1 dev build (2026-10-16) set the
+// main mission's "left" byte (+0x43, pair 7 of the tracked items) of wc1020 Gasworks (key BABF660A, entry 41) to 1 while repopulating
+// it, and the game saved it; before that the entry read +0x42 1 +0x43 0 (completed). Never in a release: in another player's save
+// an unfinished Gasworks has the same bytes.
+#define MM_SAVEFIX_GASWORKS 0
+#if MM_SAVEFIX_GASWORKS
+static void GasworksSaveFix() {
+    __try {
+        const uint8_t* t = *(const uint8_t* const*)A_LocationInfoTable;
+        uint8_t* e = t ? *(uint8_t* const*)t : nullptr;
+        unsigned count = t ? *(const unsigned*)(t + 8) : 0;
+        for (unsigned i = 0; e && i < count && i < 1024; i++, e += 0x60) {
+            if (*(const unsigned*)(e + 0x30) != 0xBABF660Au) continue;
+            LogLine("SAVEFIX Gasworks (wc1020): entry %u, main mission total %d, left %d", i, e[0x42], e[0x43]);
+            if (e[0x42] == 1 && e[0x43] == 1) { e[0x43] = 0; LogLine("SAVEFIX Gasworks: left set to 0 (main mission done); save the game to keep it"); }
+            return;
+        }
+        LogLine("SAVEFIX Gasworks: entry BABF660A not found (%u entries)", count);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { LogLine("SAVEFIX Gasworks: exception"); }
+}
+#endif
+
+// Diagnostic (user 2026-11-14: Gob Stone sd1010 retaken with no fight; log: its 15 points went off 11 s after the enemy location
+// loaded, player 332 m away, nothing spawned). Every point of a held camp switched off, with the exe return addresses on the stack
+// (resolve with pdb_symbols.json): the game's event chain that did it. Static: all 15 points listen to B156552B, sent by
+// evt.scrotus_camp_enemies.despawn and by the CArenaSpawner (its 214B0328), like Dead End's 94204868.
+// r33 (user 2026-11-14, after the r32 test: "faca testes automaticos para entender"): r32's stacks all start in
+// CEventSystem::DispatchPostedEvents, a posted event whose sender is gone. So every post is remembered per event id: the event being
+// dispatched when it was posted (its parent), the poster's exe return addresses, and for direct sends the event they ran inside; the
+// POINTDIAG line then walks that chain back (EVDIAG lines). Static guess to prove or refute: Gob Stone's base location holds
+// evr.check_if_camp_completed (saved 1 once liberated) -> 1EAB8947 -> gsr.fuel_cam_control (fuel_center_cam_control.gsr, the camp
+// completion screen) sends 72EDE02F -> etc.camp_enemies_despawn sends B156552B -> all 15 points off. Those ids are logged live.
+// CEventImpl (0x18 bytes, the system's array at +0x80): +0xC event hash, +8 scope (GetSortId, GetEventFromCache key scope:hash).
+// A posted CEventBase points at a descriptor: u16 0, u16 n, then n (hash, scope) pairs; or a registered event: n = byte +1 & 0x7F,
+// u16 indexes into that array from +2 (CEventSystem::DispatchSendEvents).
+#define MM_POINT_DIAG 0
+#if MM_POINT_DIAG
+static const uintptr_t A_EventImplSend = 0x1409C25D0;     // NEvent::CEventImpl::Send(const CEventData&)
+static const uintptr_t A_EventSystemPost = 0x1409C4600;   // CEventSystem::PostEvent(CEventBase*, const CEventData&)
+struct EvRecord { unsigned hash, scope, parent, sendParent; DWORD postTick, sendTick; uintptr_t poster[8]; };
+static EvRecord g_evRec[16384];
+static thread_local unsigned t_evStack[16];
+static thread_local int t_evDepth;
+static const unsigned g_evWatch[] = { 0xB156552B, 0x72EDE02F, 0x1EAB8947, 0x2E0E9A22, 0xDAF47E0B, 0x42EEAA53, 0x49B93A7D, 0xEB9E3BB3, 0xC6B60C08,
+                                      0xCE62E1E8, 0xC1A16ED8, 0x2939A218, 0x8500DE52, 0xA11B3196, 0xACC7E7F3 };
+// r38 autotest F (2026-11-15 13:28): Finger Peak's enemy location went off 1.8 s after the third kill, sent by a Timer of its base
+// location's gsr.fuel_cam_control (fuel_center_cam_control.gsr, the camp completion; 72EDE02F despawns the enemies, 6E8F303A ->
+// 673228D7 switches the location off). Its three Start nodes take CE62E1E8, C1A16ED8 (evt.location_100_percent, sent by the
+// location_info_tracked_item_completion graphs) and 2939A218 (the CPerimeterSystemObject BDAB949B, save=1, with 8500DE52, A11B3196,
+// ACC7E7F3; disable.on.camp.completion listens to 8500DE52 + 2939A218): which one started it, and the chain behind it
+static bool EvChainWatch(unsigned h) { return h == 0xCE62E1E8 || h == 0xC1A16ED8 || h == 0x2939A218 || h == 0x8500DE52 || h == 0xA11B3196 || h == 0xACC7E7F3; }
+static void EvChain(const char* camp, unsigned h);
+// r35: EB9E3BB3 fires a01_sd1010.blo's CForcePulse pulse_kill_sniper (and many tower objects'), C6B60C08 its constraints: generic hashes
+// every tower uses, so these two are logged only near Gob Stone
+static const float EV_NEAR_ONLY_R = 700.f;
+static volatile LONG g_evWatchLines;
+// r33 first autotest (17:32): the plugin log went silent from the loading screen on (STALL, no crash). Stack captures and log lines
+// from inside these hooks on any thread are the suspects, so both now happen only on the game thread (the one RepopTick runs on, 0
+// until the first frame in the world) and at most EV_CAPTURES_PER_S stack captures a second; elsewhere only the ids are recorded.
+static volatile DWORD g_evMainThread;
+static const LONG EV_CAPTURES_PER_S = 300;
+static volatile LONG g_evCaptures; static volatile DWORD g_evCaptureSecond;
+static bool EvOnMainThread() { return g_evMainThread && GetCurrentThreadId() == g_evMainThread; }
+static bool EvMayCapture() {
+    if (!EvOnMainThread()) return false;
+    DWORD s = GetTickCount() / 1000;
+    if (s != g_evCaptureSecond) { g_evCaptureSecond = s; g_evCaptures = 0; }
+    return ++g_evCaptures <= EV_CAPTURES_PER_S;
+}
+static unsigned EvCurrent() { return t_evDepth > 0 ? t_evStack[(t_evDepth > 16 ? 16 : t_evDepth) - 1] : 0; }
+static EvRecord& EvSlot(unsigned h) {
+    EvRecord& s = g_evRec[(h ^ (h >> 14)) & 16383];
+    if (s.hash != h) { memset(&s, 0, sizeof s); s.hash = h; }
+    return s;
+}
+static float EvGobStoneDistance() {
+    for (const CampEntry& c : g_camps)
+        if (strstr(c.name, "sd1010")) { float dx = g_PlayerPos.x - c.x, dz = g_PlayerPos.z - c.z; return sqrtf(dx * dx + dz * dz); }
+    return -1.f;
+}
+static void EvFormat(const uintptr_t* a, int n, char* out, size_t size) {
+    size_t len = 0; out[0] = 0;
+    for (int k = 0; k < n && a[k] && len + 12 < size; k++) len += snprintf(out + len, size - len, " %llX", (unsigned long long)a[k]);
+}
+static void EvWatchLog(const char* what, unsigned h, unsigned scope, unsigned parent, const uintptr_t* poster) {
+    bool watched = false;
+    for (unsigned w : g_evWatch) if (w == h) watched = true;
+    if (watched && (h == 0xEB9E3BB3 || h == 0xC6B60C08)) { float d = EvGobStoneDistance(); watched = d >= 0.f && d < EV_NEAR_ONLY_R; }
+    if (!watched || !EvOnMainThread() || InterlockedIncrement(&g_evWatchLines) > 400) return;
+    char c[160] = "";
+    if (poster) EvFormat(poster, 8, c, sizeof c);
+    LogLine("EVDIAG %s %08X (scope %08X) inside %08X, player %.0f m from Gob Stone%s%s", what, h, scope, parent, EvGobStoneDistance(), c[0] ? "; poster" : "", c);
+    if (EvChainWatch(h) && parent) EvChain("watch", parent);
+}
+static void EvRecordPost(unsigned h, unsigned scope, unsigned parent, const uintptr_t* poster) {
+    EvRecord& s = EvSlot(h);
+    s.scope = scope; s.parent = parent; s.postTick = GetTickCount();
+    memcpy(s.poster, poster, sizeof s.poster);
+    EvWatchLog("post", h, scope, parent, poster);
+}
+DEFHOOK(void, EventSystemPost, (uint8_t* sys, const uint8_t* const* ev, const void* data)) {
+    __try {
+        const uint8_t* d = ev ? ev[0] : nullptr;
+        if (d) {
+            uintptr_t poster[8] = { (uintptr_t)_ReturnAddress() }; void* f[16]; int n = 0;
+            if (EvMayCapture()) {
+                USHORT c = RtlCaptureStackBackTrace(1, 16, f, NULL);
+                for (USHORT k = 0; k < c && n < 8; k++)
+                    if ((uintptr_t)f[k] >= 0x140000000ull && (uintptr_t)f[k] < 0x141AA8000ull) poster[n++] = (uintptr_t)f[k];
+            }
+            unsigned parent = EvCurrent();
+            if (*(const uint16_t*)d == 0) {
+                unsigned cnt = *(const uint16_t*)(d + 2);
+                for (unsigned k = 0; k < cnt && k < 8; k++)
+                    EvRecordPost(*(const unsigned*)(d + 4 + 8 * k), *(const unsigned*)(d + 8 + 8 * k), parent, poster);
+            } else {
+                unsigned cnt = d[1] & 0x7F;
+                for (unsigned k = 0; k < cnt && k < 8; k++) {
+                    const uint8_t* impl = sys + 0x80 + (size_t)*(const uint16_t*)(d + 2 + 2 * k) * 0x18;
+                    EvRecordPost(*(const unsigned*)(impl + 0xC), *(const unsigned*)(impl + 8), parent, poster);
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    EventSystemPost_orig(sys, ev, data);
+}
+DEFHOOK(void, EventImplSend, (uint8_t* impl, const void* data)) {
+    unsigned h = 0, scope = 0, parent = EvCurrent();
+    __try { h = *(const unsigned*)(impl + 0xC); scope = *(const unsigned*)(impl + 8); } __except (EXCEPTION_EXECUTE_HANDLER) { h = 0; }
+    if (h) {
+        EvRecord& s = EvSlot(h);
+        s.sendParent = parent; s.sendTick = GetTickCount();
+        // r38b: 2939A218 came "sent inside 00000000", a direct send from code: who sent it
+        uintptr_t sender[8] = {}; int n = 0;
+        if (EvChainWatch(h) && EvOnMainThread()) {
+            void* f[24];
+            USHORT c = RtlCaptureStackBackTrace(1, 24, f, NULL);
+            for (USHORT k = 0; k < c && n < 8; k++)
+                if ((uintptr_t)f[k] >= 0x140000000ull && (uintptr_t)f[k] < 0x141AA8000ull) sender[n++] = (uintptr_t)f[k];
+        }
+        EvWatchLog("sent", h, scope, parent, n ? sender : nullptr);
+    }
+    if (t_evDepth < 16) t_evStack[t_evDepth] = h;
+    t_evDepth++;
+    EventImplSend_orig(impl, data);
+    t_evDepth--;
+}
+// the chain behind the event now being dispatched: a direct send leads to the event it ran inside, a posted one to the event being
+// dispatched when it was posted (0: posted from outside any event, e.g. a graph script's own update or a timer; the poster shows who)
+static void EvChain(const char* camp, unsigned h) {
+    DWORD now = GetTickCount();
+    for (int n = 0; n < 8 && h; n++) {
+        const EvRecord& s = g_evRec[(h ^ (h >> 14)) & 16383];
+        if (s.hash != h) { LogLine("EVDIAG %s:   %08X: no record", camp, h); return; }
+        char c[160]; EvFormat(s.poster, 8, c, sizeof c);
+        LogLine("EVDIAG %s:   %08X (scope %08X): sent %.1f s ago inside %08X; posted %.1f s ago inside %08X, poster%s", camp, h, s.scope,
+            s.sendTick ? (now - s.sendTick) / 1000.f : -1.f, s.sendParent, s.postTick ? (now - s.postTick) / 1000.f : -1.f, s.parent, c);
+        unsigned next = s.sendParent ? s.sendParent : s.parent;
+        h = next == h ? 0 : next;
+    }
+}
+DEFHOOK(void, SpawnPointEnable, (uint8_t* go, bool on)) {
+    unsigned id = 0; uint8_t was = 0;
+    __try { id = *(const unsigned*)(go + 0x14); was = go[0x222]; } __except (EXCEPTION_EXECUTE_HANDLER) { id = 0; }
+    SpawnPointEnable_orig(go, on);
+    if (on || !was || !id || !g_repopInit) return;
+    const int N = sizeof g_camps / sizeof g_camps[0];
+    for (int i = 0; i < N; i++) {
+        const RepopCamp& r = g_repop[i];
+        if (r.state != RP_PENDING && r.state != RP_ACTIVE) continue;
+        for (int j = 0; j < r.revivedCount; j++) {
+            if (r.revivedIds[j] != id) continue;
+            void* f[24]; char callers[320]; size_t len = 0; callers[0] = 0;
+            USHORT c = RtlCaptureStackBackTrace(1, 24, f, NULL);
+            for (USHORT k = 0; k < c && len + 12 < sizeof callers; k++) {
+                uintptr_t a = (uintptr_t)f[k];
+                if (a >= 0x140000000ull && a < 0x141AA8000ull) len += snprintf(callers + len, sizeof callers - len, " %llX", (unsigned long long)a);
+            }
+            float dx = g_PlayerPos.x - g_camps[i].x, dz = g_PlayerPos.z - g_camps[i].z;
+            unsigned ev = EvCurrent();
+            LogLine("POINTDIAG %s: spawn point %08X switched off by the game (event %08X), player %.0f m away; callers%s", g_camps[i].name, id, ev,
+                sqrtf(dx * dx + dz * dz), callers);
+            // the chain once per event and camp within 30 s (15 points go off on one despawn event)
+            static unsigned lastEv; static int lastCamp = -1; static DWORD lastTick;
+            if (ev != lastEv || i != lastCamp || GetTickCount() - lastTick > 30000) {
+                lastEv = ev; lastCamp = i; lastTick = GetTickCount();
+                EvChain(g_camps[i].name, ev);
+            }
+            return;
+        }
+    }
+}
+// r38 (user test 2026-11-15: Finger Peak sd1240 retaken by the game itself after 2 kills, 10 enemies alive: "enemy location switched
+// off by the game"; the same as sd1270 / sd1290 on 2026-11-06 and Hollow Point): SLocationInfo::HandleEvent switches a location on with
+// the event at +0x70 and off with the one at +0x78 (bit 0 of +0x67). Every held camp's enemy location switched off is logged with the
+// event, the exe callers and the chain behind the event (EvChain)
+static const uintptr_t A_LocInfoHandleEvent = 0x14066C430;   // SLocationInfo::HandleEvent(const CEventImpl*, const CEventData&)
+DEFHOOK(void, LocInfoHandleEvent, (uint8_t* info, const uint8_t* impl, const void* data)) {
+    uint8_t was = 0;
+    __try { was = info[0x67]; } __except (EXCEPTION_EXECUTE_HANDLER) { was = 0; }
+    LocInfoHandleEvent_orig(info, impl, data);
+    uint8_t now = 1;
+    __try { now = info[0x67]; } __except (EXCEPTION_EXECUTE_HANDLER) { now = 1; }
+    if (!(was & 1) || (now & 1) || !g_repopInit) return;
+    unsigned h = 0, scope = 0;
+    __try { h = *(const unsigned*)(impl + 0xC); scope = *(const unsigned*)(impl + 8); } __except (EXCEPTION_EXECUTE_HANDLER) { h = 0; }
+    const int N = sizeof g_camps / sizeof g_camps[0];
+    for (int i = 0; i < N; i++) {
+        uint8_t* l[4]; int n = FindLocations(g_camps[i].enemyId, l, 4);
+        bool mine = false;
+        for (int k = 0; k < n; k++) if (l[k] == info) mine = true;
+        if (!mine) continue;
+        void* f[24]; char callers[320]; size_t len = 0; callers[0] = 0;
+        USHORT c = RtlCaptureStackBackTrace(1, 24, f, NULL);
+        for (USHORT k = 0; k < c && len + 12 < sizeof callers; k++) {
+            uintptr_t a = (uintptr_t)f[k];
+            if (a >= 0x140000000ull && a < 0x141AA8000ull) len += snprintf(callers + len, sizeof callers - len, " %llX", (unsigned long long)a);
+        }
+        LogLine("LOCDIAG %s: enemy location switched off by the game (event %08X scope %08X, camp %s), player %.0f m away; callers%s", g_camps[i].name, h, scope,
+            RP_NAMES[g_repop[i].state], CampDistance(g_camps[i]), callers);
+        EvChain(g_camps[i].name, h);
+        return;
+    }
+}
+// r35 lookout diagnostic (2026-11-14, autotest B 20:39: lookout F408814D still died 2 s after spawning with its tower parts rebuilt, all
+// 8 had loaded switched off, none broken): where the lookout is and its health every 0.1 s for 6 s after the repop tick first sees it,
+// the tower parts' flags then, and every force pulse fired near Gob Stone with what it hits (a01_sd1010.blo has a CForcePulse
+// pulse_kill_sniper 7804E333, ACT_HIT_BY_IMPACT, fired by EB9E3BB3: is it what kills the lookout?)
+// r36: r35 read 0,0,0 and health 0 for 6 s (the object was not checked to be a character): now the spawn point's entity is read again
+// at every sample (EnemyVitalsRead) and position / health only for a CCharacter
+struct LookWatch { uint8_t* go; const uint8_t* sp; unsigned id; int camp; float t, next; };
+static LookWatch g_lw;
+static volatile LONG g_pulseLines;
+static void TowerPartsDiag(int i) {
+    const RepopCamp& r = g_repop[i];
+    uint8_t* l[4]; int n = FindLocations(g_campBase[i], l, 4);
+    char out[400]; size_t len = 0; out[0] = 0;
+    for (int j = 0; j < r.towerCount && len + 16 < sizeof out; j++) {
+        uint8_t* go = FindInLocations(l, n, r.towerIds[j]);
+        int flags = -1;
+        if (go) __try { flags = go[0x238]; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        len += flags < 0 ? snprintf(out + len, sizeof out - len, " %08X=--", r.towerIds[j]) : snprintf(out + len, sizeof out - len, " %08X=%02X", r.towerIds[j], flags);
+    }
+    LogLine("LOOKDIAG %s: tower part flags (%d base locations):%s", g_camps[i].name, n, out);
+}
+static void LookWatchStart(int i, unsigned id, const uint8_t* sp, const EnemyVitals& v) {
+    static uint8_t* seen[32]; static int seenN;                  // one watch at a time, each character once
+    if (g_lw.go) return;
+    for (int k = 0; k < seenN; k++) if (seen[k] == v.go) return;
+    if (seenN < 32) seen[seenN++] = v.go;
+    g_lw.go = v.go; g_lw.sp = sp; g_lw.id = id; g_lw.camp = i; g_lw.t = 0.f; g_lw.next = 0.f;
+    LogLine("LOOKDIAG %s: lookout %08X entity object %p, vftable %llX (%s), %d objects", g_camps[i].name, id, v.go,
+        (unsigned long long)v.vt, v.vt == VT_CHARACTER_GO ? "character" : "not a character", v.objects);
+    TowerPartsDiag(i);
+}
+static void LookWatchTick(float dt) {
+    if (!g_lw.go) return;
+    g_lw.t += dt;
+    if (g_lw.t < g_lw.next) return;
+    g_lw.next = g_lw.t + 0.1f;
+    EnemyVitals v;
+    bool have = EnemyVitalsRead(g_lw.sp, &v);
+    float* p = have && v.vt == VT_CHARACTER_GO ? CharacterPos(v.go) : nullptr;
+    if (!have) LogLine("LOOKDIAG %s: lookout %08X after %.1f s: no entity", g_camps[g_lw.camp].name, g_lw.id, g_lw.t);
+    else if (v.vt != VT_CHARACTER_GO) LogLine("LOOKDIAG %s: lookout %08X after %.1f s: object %p not a character (vftable %llX)", g_camps[g_lw.camp].name, g_lw.id, g_lw.t, v.go, (unsigned long long)v.vt);
+    else LogLine("LOOKDIAG %s: lookout %08X after %.1f s: character %p at %.2f %.2f %.2f, health %.3f, vehicle %p", g_camps[g_lw.camp].name, g_lw.id, g_lw.t,
+        v.go, p ? p[0] : 0.f, p ? p[1] : 0.f, p ? p[2] : 0.f, v.hp, v.vehicle);
+    if (g_lw.t >= 6.f) g_lw.go = nullptr;
+}
+static const uintptr_t A_ForcePulseExplode = 0x14047F030;         // CForcePulse::Explode(hkLocalArray<CPhysicsGameObject*>*)
+static const uintptr_t A_ForcePulseExplodeObject = 0x14047EA60;   // CForcePulse::ExplodeGameObject(CPhysicsGameObject*, float, hkLocalArray*, hkArray&)
+static bool PulseMayLog() {
+    float d = EvGobStoneDistance();
+    return d >= 0.f && d < EV_NEAR_ONLY_R && InterlockedIncrement(&g_pulseLines) <= 150;
+}
+static unsigned PulseId(const uint8_t* pulse) {           // the CGameObject base is at +8 (StartExplode calls its vtable there), id at +0x14
+    __try { return *(const unsigned*)(pulse + 8 + 0x14); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+DEFHOOK(void, ForcePulseExplode, (uint8_t* pulse, void* hits)) {
+    if (PulseMayLog())
+        LogLine("PULSEDIAG explode: pulse %08X (%p), player %.1f %.1f %.1f, %.0f m from Gob Stone; lookout watched %p", PulseId(pulse), pulse,
+            g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z, EvGobStoneDistance(), g_lw.go);
+    ForcePulseExplode_orig(pulse, hits);
+}
+DEFHOOK(void, ForcePulseExplodeObject, (uint8_t* pulse, uint8_t* target, float f, void* hits, void* bodies)) {
+    if (PulseMayLog()) {
+        unsigned tid = 0;
+        __try { tid = *(const unsigned*)(target + 0x14); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        LogLine("PULSEDIAG   pulse %08X hits object %p (id at +0x14 %08X), %.3f; lookout watched %p", PulseId(pulse), target, tid, f, g_lw.go);
+    }
+    ForcePulseExplodeObject_orig(pulse, target, f, hits, bodies);
+}
+#endif
+
+// the camp is held: the enemy location on and the civilians off; a new repopulation, no kills and no base guards yet
+static void RepopHold(int i) {
     const CampEntry& c = g_camps[i]; RepopCamp& r = g_repop[i];
     SetLocBit(c.enemyId, true);
     SetLocBit(c.civilianId, false);
     BlockCivilians(c.civilianId, true);
-    // (towers are not rebuilt: no TowersForCycle, the destructible-load hook has nothing to repair)
     r.state = RP_PENDING; r.revived = false; r.revivedCount = 0; r.cycleStarted = false; r.deadCount = 0; r.armed = false;
+    r.baseCount = 0; r.baseDone = false; r.baseIgnored = 0; memset(r.baseNoLive, 0, sizeof r.baseNoLive); memset(r.baseLost, 0, sizeof r.baseLost);
+}
+// the camp falls, out of the player's sight
+static void RepopAttack(int i, float d) {
+    const CampEntry& c = g_camps[i]; RepopCamp& r = g_repop[i];
+    RepopHold(i);
     LogLine("CAMPREPOP %s: repopulating (player %.0f m away%s)", c.name, d, r.forced ? ", forced" : "");
+    TowersForCycle(i);                                   // lookout towers (diagnostic)
     CampAttacked(i);
 }
 
@@ -1088,6 +1748,10 @@ static float SpawnPointDistance(uint8_t* sp, const CampEntry& c, float campDista
 }
 
 static void RepopTick(float dt) {
+#if MM_POINT_DIAG
+    g_evMainThread = GetCurrentThreadId();
+    LookWatchTick(dt);
+#endif
     static float acc; acc += dt;
     if (acc < 1.f || g_repopSaving) return;
     float step = acc; acc = 0.f;
@@ -1109,17 +1773,23 @@ static void RepopTick(float dt) {
         LogLine("LOOTREPOP ready: %d scavenging locations with enemies", (int)(sizeof g_loot / sizeof g_loot[0]));
         for (int i = 0; i < SN_N; i++) { g_sn[i].cd = RandCooldown(); g_sn[i].armed = false; }
         LogLine("SNIPEREPOP ready: %d sniper locations", SN_N);
+        for (int i = 0; i < MF_N; i++) { g_mf[i] = MinefieldState(); g_mf[i].cd = RandCooldown(); }
+        LogLine("MINEREPOP ready: %d minefields", MF_N);
 #if MM_CAMP_DIAG
         CampDiagLocTable();
+#endif
+#if MM_SAVEFIX_GASWORKS
+        GasworksSaveFix();
 #endif
     }
     LootTick(step);
     SniperTick(step);
+    MinefieldTick(step);
 #if MM_CAMP_DIAG
     CampDiagTick(step);
 #endif
     bool anyActive = false;
-    int taken = 0, attackable = 0, attackPick = -1, firstPick = -1;
+    int taken = 0, attackable = 0, attackPick = -1, firstPick = -1, firstRank = -1;
     for (int i = 0; i < N; i++) {
         if (g_repop[i].state == RP_ACTIVE) anyActive = true;
         if (g_repop[i].state == RP_ACTIVE || g_repop[i].state == RP_PENDING) taken++;
@@ -1138,7 +1808,8 @@ static void RepopTick(float dt) {
             if (r.forced) RepopAttack(i, d);
             else {
                 if (rand() % ++attackable == 0) attackPick = i;         // an even pick among the camps that can fall, used after the loop
-                if (g_repopFirstCamp[0] && strstr(c.name, g_repopFirstCamp)) firstPick = i;
+                for (int t = 0; t < g_repopFirstN; t++)
+                    if (strstr(c.name, g_repopFirstCamp[t])) { if (firstPick < 0 || t < firstRank) { firstPick = i; firstRank = t; } break; }
             }
             break;
         case RP_PENDING:
@@ -1172,13 +1843,14 @@ static void RepopTick(float dt) {
                 if (d > REPOP_LOAD + 150.f && r.revived) { r.revived = false; r.cycleStarted = false; r.baseDone = false; LogLine("CAMPREPOP %s: player left, enemies will respawn on the next approach", c.name); r.state = RP_PENDING; }
                 break;
             }
+            LookoutsToGround(i, sp, ids, n);                     // before the cycle below spawns them
             if (!r.cycleStarted) {
                 // once per repopulation. Only character spawn points (spawn distance <= 100 m, the camp's spp.*) are tracked: the
                 // others (370 m, the lookouts: 47 points, one sniper each) switch themselves off right after spawning, which is not a death: they count too, through the spawn system (lookoutMask). Every character spawn point of the camp is switched on and spawned, and all of them are tracked: some were left
                 // on by earlier cycles or by the save and spawn enemies too (user test 2026-10-14: tracking only the revived ones
                 // declared the camp cleared with enemies alive); the others are revived but not tracked
                 int off = 0, ok = 0, kept = 0;
-                r.revivedCount = 0; r.lookoutMask = 0;
+                r.revivedCount = 0; r.lookoutMask = 0; r.topDog = 0;
                 for (int k = 0; k < n; k++) {
                     if (InPoints(g_nonCharPoints, ids[k])) continue;
                     if (InPoints(g_vanishPoints, ids[k])) { sp[k][0x232] = 0; continue; }
@@ -1186,14 +1858,26 @@ static void RepopTick(float dt) {
                     bool wasOff = !sp[k][0x232];
                     if (wasOff) off++;
                     if (RepopIsDead(r, ids[k])) { sp[k][0x232] = 0; kept++; continue; }   // killed before the player left: stays dead
+                    float lx, lz;
+                    if (!character && SpawnPointXZ(sp[k], c.x, c.z, &lx, &lz) && (lx - c.x) * (lx - c.x) + (lz - c.z) * (lz - c.z) > REPOP_LOOKOUT_FAR * REPOP_LOOKOUT_FAR) {
+                        LogLine("CAMPREPOP %s: lookout %08X %.0f m from the camp centre, left to the game", c.name, ids[k], sqrtf((lx - c.x) * (lx - c.x) + (lz - c.z) * (lz - c.z)));
+                        continue;
+                    }
                     if (!character && (!wasOff || r.armed)) {
                         int chars, dead;
                         SpawnEntityChars(sp[k], &chars, &dead);
                         if (!wasOff || chars) RepopTrackLookout(r, ids[k]);
                         continue;
                     }
-                    if (IsTopDog(ids[k])) { LogLine("CAMPREPOP %s: Top Dog spawn point %08X left off", c.name, ids[k]); continue; }
+                    if (IsTopDog(ids[k]) || (TopDogPoint(ids[k]) && strstr(c.name, "_wc"))) {   // warchiefs: their death opens the arena (see EventSend_hook)
+                        LogLine("CAMPREPOP %s: Top Dog spawn point %08X left off", c.name, ids[k]);
+                        continue;
+                    }
                     if (character && r.revivedCount < 32) {
+                        if (TopDogPoint(ids[k])) {
+                            r.topDog = ids[k];
+                            LogLine("CAMPREPOP %s: Top Dog spawn point %08X back, one more enemy to beat; its completion events are dropped while the camp is held", c.name, ids[k]);
+                        }
                         sp[k][0x232] = 1; ok++;                   // enabled now, spawned when the player gets near it (below)
                         r.revivedIds[r.revivedCount++] = ids[k];
                         if (InPoints(g_triggerPoints, ids[k])) LogLine("CAMPREPOP %s: spawn point %08X left to its own trigger", c.name, ids[k]);
@@ -1201,10 +1885,15 @@ static void RepopTick(float dt) {
                 }
                 r.spawnedMask = r.lookoutMask; r.liveMask = 0; r.ignoredMask = 0; memset(r.noLive, 0, sizeof r.noLive); r.armed = true;
                 memset(r.liveTime, 0, sizeof r.liveTime); memset(r.lost, 0, sizeof r.lost);
-                r.revived = true; r.cycleStarted = true; r.baseCount = 0; r.baseDone = false; r.baseWait = 0.f;
+                // r40: the base guards of the earlier cycle are kept (user test 2026-11-15, r37: Hell's Grill sd2060 retaken on the return with
+                // its base guard 2C5141C7 alive, the only one left: its 29 camp points were dead and the base count started again from 0)
+                r.revived = true; r.cycleStarted = true; r.baseDone = false; r.baseWait = 0.f;
                 g_repopTotal++;
+                int guards = 0;
+                for (int j = 0; j < r.baseCount; j++) if (!RepopIsDead(r, r.baseIds[j]) && !(r.baseIgnored >> j & 1)) guards++;
                 LogLine("CAMPREPOP %s: %d spawn points, %d were off, %d enabled, %d character spawn points tracked, %d stay dead", c.name, n, off, ok, r.revivedCount, kept);
-                if (!r.revivedCount) { if (kept) CampRetaken(i); RepopRestore(i, kept ? "all enemies defeated" : "nothing to revive"); }
+                if (guards) LogLine("CAMPREPOP %s: %d base guard(s) alive when the player left still count", c.name, guards);
+                if (!r.revivedCount && !guards) { if (kept) CampRetaken(i); RepopRestore(i, kept ? "all enemies defeated" : "nothing to revive"); }
                 break;
             }
             if (!r.revived) { r.revived = true; LogLine("CAMPREPOP %s: back in range, %d tracked spawn points", c.name, r.revivedCount); }
@@ -1224,6 +1913,9 @@ static void RepopTick(float dt) {
                             if (again < 2) LogLine("CAMPREPOP %s: spawn point %08X: god mode %s on character %p", c.name, ids[k], again ? "came back, switched off again" : "switched off", god);
                         }
                         if (r.lookoutMask >> j & 1) {             // the game spawns these by itself: counted until the spawn system shows the sniper dead, or gone for good
+#if MM_POINT_DIAG
+                            if (chars && r.towerCount) { EnemyVitals v; if (EnemyVitalsRead(sp[k], &v) && v.go) LookWatchStart(i, ids[k], sp[k], v); }
+#endif
                             if ((r.ignoredMask >> j & 1) || chars) { r.noLive[j] = 0.f; continue; }
                             if (dead && dd <= REPOP_LOST_RANGE) {
                                 sp[k][0x232] = 0; r.ignoredMask |= 1u << j; RepopRememberDead(r, ids[k]);
@@ -1330,10 +2022,19 @@ static void RepopTick(float dt) {
                         }
                         bool warCrier = IsWarCrierSpawnPoint(i, bids[k]);
                         if (warCrier) continue;                          // user 2026-10-16: no structures (towers, drummers) come back
+                        int known = -1;
+                        for (int j = 0; j < r.baseCount; j++) if (r.baseIds[j] == bids[k]) known = j;
+                        if (known >= 0) {                                // tracked before the player left: back on if it went off with the location
+                            if (!bsp[k][0x232] && !RepopIsDead(r, bids[k]) && !(r.baseIgnored >> known & 1) && SafeRevive(bsp[k])) {
+                                r.baseNoLive[known] = 0.f;
+                                LogLine("CAMPREPOP %s: base spawn point %08X revived again (alive when the player left)", c.name, bids[k]);
+                            }
+                            continue;
+                        }
                         if (!InPoints(g_baseCharPoints, bids[k]) || bsp[k][0x232]) continue;   // characters only; ones already on are left alone
                         if (IsTopDog(bids[k]) || RepopIsDead(r, bids[k])) continue;
                         boff++;
-                        if (SafeRevive(bsp[k]) && r.baseCount < 16) { r.baseIds[r.baseCount++] = bids[k]; LogLine("CAMPREPOP %s: base spawn point %08X revived%s", c.name, bids[k], warCrier ? " (War Crier)" : ""); }
+                        if (SafeRevive(bsp[k]) && r.baseCount < 16) { r.baseNoLive[r.baseCount] = 0.f; r.baseLost[r.baseCount] = 0; r.baseIds[r.baseCount++] = bids[k]; LogLine("CAMPREPOP %s: base spawn point %08X revived%s", c.name, bids[k], warCrier ? " (War Crier)" : ""); }
                     }
                     LogLine("CAMPREPOP %s: base location %d spawn points, %d character ones were off, %d revived and tracked, %d loot points left on switched off", c.name, bn, boff, r.baseCount, lootOff);
                 } else if (r.baseWait > 60.f) { r.baseDone = true; LogLine("CAMPREPOP %s: base location not loaded, its characters skipped", c.name); }
@@ -1341,8 +2042,36 @@ static void RepopTick(float dt) {
             int alive = 0;                                       // revived spawn points still on = their enemies not dead yet
             for (int k = 0; k < n; k++)
                 for (int j = 0; j < r.revivedCount; j++) if (ids[k] == r.revivedIds[j] && (sp[k][0x232] || (r.lookoutMask >> j & 1)) && !(r.ignoredMask >> j & 1)) alive++;
-            for (int k = 0; k < bn; k++)
-                for (int j = 0; j < r.baseCount; j++) if (bids[k] == r.baseIds[j]) { if (bsp[k][0x232]) alive++; else RepopRememberDead(r, bids[k]); }
+            // r40: a base guard is counted while its point is on; one that lost its enemy alive is asked again when the player is within
+            // REPOP_SPAWN of its point, as the camp points are (user test 2026-11-15, r37: Hell's Grill stayed taken with "1 left" and nobody
+            // there: its guard 2C5141C7 is 86 m from the camp centre, the player stood 130 m from it, the game spawns it again only within 50 m)
+            for (int j = 0; j < r.baseCount; j++) {
+                if (RepopIsDead(r, r.baseIds[j]) || (r.baseIgnored >> j & 1)) continue;
+                int k = 0;
+                while (k < bn && bids[k] != r.baseIds[j]) k++;
+                if (!r.baseDone || k >= bn) { alive++; continue; }   // not looked at yet in this cycle, or its location is not loaded: alive
+                if (!bsp[k][0x232]) { RepopRememberDead(r, bids[k]); continue; }
+                int chars, dead;
+                bool entity = SpawnEntityChars(bsp[k], &chars, &dead);
+                float dd = SpawnPointDistance(bsp[k], c, d);
+                if (entity && !chars && dead && dd <= REPOP_LOST_RANGE) {
+                    bsp[k][0x232] = 0; RepopRememberDead(r, bids[k]);
+                    LogLine("CAMPREPOP %s: base spawn point %08X still on with its enemy dead, switched off", c.name, bids[k]);
+                    continue;
+                }
+                alive++;
+                if (chars || SpawnStatus(bsp[k] + 0x10) == 4) { r.baseNoLive[j] = 0.f; continue; }
+                if (dd > REPOP_SPAWN || (r.baseNoLive[j] += step) < REPOP_NO_SPAWN) continue;
+                r.baseNoLive[j] = 0.f;
+                if (r.baseLost[j] < REPOP_MAX_LOST) {
+                    r.baseLost[j]++;
+                    SafeRevive(bsp[k]);
+                    LogLine("CAMPREPOP %s: base spawn point %08X has no enemy, asked again (%d of %d, %.0f m from the player)", c.name, bids[k], r.baseLost[j], REPOP_MAX_LOST, dd);
+                } else {
+                    r.baseIgnored |= 1u << j; alive--;
+                    LogLine("CAMPREPOP %s: base spawn point %08X not counted any more (gave no enemy, %.0f m from the player)", c.name, bids[k], dd);
+                }
+            }
             // a point left to its own trigger (sd2090's perch gimp 3B9F5107) may never fire: when only such points are left, the player near them
             // brings them in (autotest 2026-11-10/11: sd2090 stayed taken with 21 of 22 dead; the player on the point did not trip it either)
             int waitTrig = 0;
@@ -1391,7 +2120,10 @@ static void RepopTick(float dt) {
         if (g_repopAttackIn <= 0.f && attackPick >= 0) {
             RepopAttack(attackPick, CampDistance(g_camps[attackPick]));
             g_repopAttackIn = RandAttack();
-            if (attackPick == firstPick) g_repopFirstCamp[0] = 0;
+            if (attackPick == firstPick) {
+                for (int t = firstRank; t + 1 < g_repopFirstN; t++) memcpy(g_repopFirstCamp[t], g_repopFirstCamp[t + 1], sizeof g_repopFirstCamp[t]);
+                g_repopFirstN--;
+            }
         }
     }
     static int nameCamp = -1;
@@ -1440,32 +2172,16 @@ static void RepopLog() {
     int snArmed = 0, snCd = 0;
     for (int i = 0; i < SN_N; i++) { snArmed += g_sn[i].armed; snCd += !g_sn[i].armed && g_sn[i].cd > 0.f; }
     LogLine("SNIPEREPOP %d sniper locations, %d armed, %d cooling down, %d snipers revived this session", SN_N, snArmed, snCd, g_snRevivedTotal);
+    int mfCleared = 0, mfArmed = 0;
+    for (int i = 0; i < MF_N; i++) { mfCleared += g_mf[i].cleared; mfArmed += g_mf[i].armed; }
+    LogLine("MINEREPOP %d minefields, %d seen cleared, %d armed, %d brought back this session", MF_N, mfCleared, mfArmed, g_mfRevivedTotal);
 }
 
-typedef void (*DestructibleFn)(void*);
-static bool SafeParts(uint8_t* obj) {
-    __try { ((DestructibleFn)A_DestructibleDisableParts)(obj); ((DestructibleFn)A_DestructibleEnableParts)(obj); return true; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
 DEFHOOK(void, DestructibleLoad, (uint8_t* go, void* ctx)) {
     DestructibleLoad_orig(go, ctx);
     if (!g_repopInit) return;
     unsigned id = 0;
     __try { id = *(const unsigned*)(go + 0x14); } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
-    const int N = sizeof g_camps / sizeof g_camps[0];
-    for (int i = 0; i < N; i++) {
-        RepopCamp& r = g_repop[i];
-        if (r.state != RP_PENDING && r.state != RP_ACTIVE) continue;
-        for (int j = 0; j < r.towerCount; j++) {
-            if (r.towerIds[j] != id) continue;
-            uint8_t* obj = go - 8;
-            uint8_t before = obj[0x240];
-            obj[0x240] = (uint8_t)((before & ~(0x01 | 0x10)) | 0x08 | 0x20);   // not broken, enabled, saved as broken
-            bool ok = SafeParts(obj);
-            LogLine("CAMPREPOP %s: War Crier tower %08X loaded intact (flags %02X -> %02X)%s", g_camps[i].name, id, before, obj[0x240], ok ? "" : " FAULTED");
-            return;
-        }
-    }
     for (int i = 0; i < SN_N; i++) {
         const SniperEntry& e = g_snipers[i];
         if (!g_sn[i].armed || !id || (id != e.platform && id != e.pylon)) continue;
@@ -1528,6 +2244,38 @@ DEFHOOK(void, LocSaveStatus, (void* save)) {
     if (n) LogLine("CAMPREPOP save: %d repopulated camp(s) written as liberated", n);
 }
 
+// r41: the game reloads the save when the player dies, and the save has every camp liberated (above): user test 2026-11-16 19:41,
+// "eu morri, o jogo recarregou" -- Hell's Grill, Dead End and Wreck Hill were all freed, two of them never visited. The camps held
+// before the load are held again, with all their enemies (the user's choice: the kills are lost, as the game's own progress is); only
+// those the loaded save has liberated: one it has in enemy hands is the game's camp again. GameLocationSystemLoadStatus (called only by
+// CGameWorld::LoadWorldProgress) sets the locations' flags from the save and starts the listed ones loading; it leaves the civilians'
+// stream block (+0x66, DisableLoading) alone
+static const uintptr_t A_LocLoadStatus = 0x140667E70;
+DEFHOOK(void, LocLoadStatus, (const void* save)) {
+    InterlockedExchange(&g_repopSaving, 1);              // RepopTick waits: until the camps are held again the flags are the save's
+    LocLoadStatus_orig(save);
+    InterlockedIncrement(&g_saveLoads);
+    if (g_repopInit) {
+        const int N = sizeof g_camps / sizeof g_camps[0];
+        int again = 0, game = 0;
+        for (int i = 0; i < N; i++) {
+            RepopCamp& r = g_repop[i];
+            if (r.state != RP_PENDING && r.state != RP_ACTIVE) continue;
+            int el, en = LocEnabled(g_camps[i].enemyId, &el);
+            if (en == 0) {
+                RepopHold(i); again++;
+                LogLine("CAMPREPOP %s: save loaded, held again with all its enemies", g_camps[i].name);
+            } else if (en > 0) {
+                BlockCivilians(g_camps[i].civilianId, false);
+                r.state = RP_IDLE; r.cooldown = RandCooldown(); game++;
+                LogLine("CAMPREPOP %s: save loaded with the camp in enemy hands, left to the game", g_camps[i].name);
+            }
+        }
+        LogLine("CAMPREPOP save loaded: %d held camp(s) held again, %d left to the game", again, game);
+    }
+    InterlockedExchange(&g_repopSaving, 0);
+}
+
 #if MM_DEV_TOOLS || MM_AUTOTEST
 // ---- autotest camp commands (plugin.cpp AutotestTick, 2026-11-10) ---------------------------------------------------------------------
 // "repop <camp>": the camp falls like numpad 5 (forced: no cooldown, once the player is REPOP_FORCED_FAR away). "kill": every live character
@@ -1556,6 +2304,15 @@ static int AutotestKillPoint(const uint8_t* sp) {
     } __except (EXCEPTION_EXECUTE_HANDLER) { LogLine("AUTOTEST kill: fault"); }
     return n;
 }
+// "die" (r41): the player dies the game's way; the game then reloads the save, and AutotestTick waits for that load
+static void AutotestDie(CCharacter* ch) {
+    ch->m_Invulnerable = false; ((uint8_t*)ch)[0xE9] = 0; ((uint8_t*)ch)[0xEA] = 0;
+    if (CVehicle* v = ch->GetVehiclePtr()) v->m_Invulnerable = false;
+    g_autoDiedAt = g_saveLoads;
+    __try { unsigned dmg = *(const unsigned*)A_DamageUnknown; DamageableSetHealth(ch, 0.f, &dmg); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { g_autoDiedAt = -1; LogLine("AUTOTEST die: fault"); return; }
+    LogLine("AUTOTEST die: player killed at %.1f %.1f %.1f (%d loads so far)", g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z, (int)g_saveLoads);
+}
 static void AutotestCampCommand(const char* cmd) {
     if (!g_worldRepopOn || !g_repopInit) { LogLine("AUTOTEST \"%s\": camp repopulation is not running", cmd); return; }
     const int N = sizeof g_camps / sizeof g_camps[0];
@@ -1573,18 +2330,47 @@ static void AutotestCampCommand(const char* cmd) {
         LogLine("AUTOTEST repop: no camp \"%s\"", arg);
         return;
     }
-    if (!strcmp(verb, "kill")) {
+    if (!strcmp(verb, "baseoff")) {   // the nearest camp's base guard points off, as the user's save had them (r37 test: sd2060's 2C5141C7 revived)
         int best = 0;
         for (int i = 1; i < N; i++) if (CampDistance(g_camps[i]) < CampDistance(g_camps[best])) best = i;
         uint8_t* sp[48]; unsigned ids[48];
+        int bn = LocSpawnPoints(g_campBase[best], sp, ids, 48), off = 0;
+        for (int k = 0; k < bn; k++)
+            if (InPoints(g_baseCharPoints, ids[k]) && sp[k][0x232]) { sp[k][0x232] = 0; off++; LogLine("AUTOTEST baseoff %s: base point %08X off", g_camps[best].name, ids[k]); }
+        LogLine("AUTOTEST baseoff %s (%.0f m): %d base guard points switched off, base location %d spawn points", g_camps[best].name, CampDistance(g_camps[best]), off, bn);
+        return;
+    }
+    if (!strcmp(verb, "kill")) {   // "kill": every enemy of the nearest camp; "kill lookout": the lookouts only; "kill one": one enemy, not a lookout
+        int best = 0;
+        for (int i = 1; i < N; i++) if (CampDistance(g_camps[i]) < CampDistance(g_camps[best])) best = i;
+        uint8_t* sp[48]; unsigned ids[48];
+        bool lookouts = !strcmp(arg, "lookout"), one = !strcmp(arg, "one"), campOnly = !strcmp(arg, "camp");
         int n = LocSpawnPoints(g_camps[best].enemyId, sp, ids, 48), killed = 0, points = 0;
-        for (int k = 0; k < n; k++) { int c = AutotestKillPoint(sp[k]); killed += c; points += c > 0; }
+        for (int k = 0; k < n; k++) {
+            if (lookouts || one) {
+                bool lookout = *(float*)(sp[k] + 0x168) > 100.f;
+                if (lookout != lookouts || (one && killed)) continue;
+            }
+            int c = AutotestKillPoint(sp[k]); killed += c; points += c > 0;
+            if (c) LogLine("AUTOTEST kill %s: point %08X, %d", g_camps[best].name, ids[k], c);
+        }
+        if (lookouts || one || campOnly) {
+            LogLine("AUTOTEST kill %s %s: %d enemies killed at %d of %d spawn points", arg, g_camps[best].name, killed, points, n);
+            return;
+        }
         // the revived base guards count too (autotest 2026-11-10: sd2060 stayed taken with its 29 points dead and base point 2C5141C7 alive)
         int baseKilled = 0, bn = LocSpawnPoints(g_campBase[best], sp, ids, 48);
         for (int k = 0; k < bn; k++)
             for (int j = 0; j < g_repop[best].baseCount; j++) if (ids[k] == g_repop[best].baseIds[j]) baseKilled += AutotestKillPoint(sp[k]);
         LogLine("AUTOTEST kill %s (%s, %.0f m): %d enemies killed at %d of %d spawn points, %d base guards of %d tracked", g_camps[best].name, RP_NAMES[g_repop[best].state],
                 CampDistance(g_camps[best]), killed, points, n, baseKilled, g_repop[best].baseCount);
+        return;
+    }
+    if (!strcmp(verb, "mines")) {   // the nearest minefield is marked cleared (MinefieldTick, once it has been loaded 3 s)
+        int best = 0;
+        for (int i = 1; i < MF_N; i++) if (MinefieldDistance(g_minefields[i]) < MinefieldDistance(g_minefields[best])) best = i;
+        g_mfAutoClear = best;
+        LogLine("AUTOTEST mines %s (%.0f m): to be marked cleared once loaded", g_minefields[best].name, MinefieldDistance(g_minefields[best]));
         return;
     }
     if (!strcmp(verb, "log")) { RepopLog(); return; }

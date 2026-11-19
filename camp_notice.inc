@@ -78,7 +78,58 @@ static bool CampNoticeQueue(const char* title, const char* detail) {
     g_noticeQueued++;
     return true;
 }
+
+// r42 (user 2026-11-17: "usar essa funcao de alerta para indicar que acampamento foi atacado ... apenas a fonte e o alerta sonoro"):
+// the camp notices go through the game's own message queue, in the storm alert's style. That alert is global.blo's CGuiMessage
+// gui_storm_warning: type 28, 5 s. CGuiMessage::SetProperties fills an SGuiNormalMessageData (+4 type, +9 / +0xA / +0xB bytes -1,
+// +0x10 / +0x18 / +0x1C gui_empty, +0x14 the text id, +0x24 2.0, +0x38 the seconds) and GameGuiMessageQueuePush queues a copy. The
+// text is a string table id, read through CLocator::GetLocalizedStringRaw when the message is drawn: the mod answers its own ids there.
+// The overlay notice stays for a message whose text the game never asks for
+static const uintptr_t A_GuiMessagePush = 0x14026ABE0;       // GameGuiMessageQueuePush(const SGuiNormalMessageData&, bool)
+static const uintptr_t A_LocatorGetStringRaw = 0x1409C1090;  // CLocator::GetLocalizedStringRaw(id): nullptr for an unknown id
+static const int NATIVE_TYPE = 28;                           // the storm alert's message type
+static const float NATIVE_SECONDS = 5.f;
+static const int NATIVE_CHECK = 8;                           // game seconds: a message whose text was not asked for by then gets the overlay notice
+static bool g_nativeOn = false;                              // the text hook is in
+static struct { volatile unsigned id; char text[96], title[64], detail[96]; volatile LONG asked; int ticks; } g_native[8];
+static int g_nativeNext;
+DEFHOOK(const char*, LocatorGetStringRaw, (void* locator, unsigned id)) {
+    if (id)
+        for (auto& n : g_native)
+            if (n.id == id) { InterlockedIncrement(&n.asked); return n.text; }
+    return LocatorGetStringRaw_orig(locator, id);
+}
+// false: not queued, the caller shows the overlay notice
+static bool NativeMessage(const char* text, const char* title, const char* detail) {
+    if (!g_nativeOn) return false;
+    static unsigned serial;
+    auto& n = g_native[g_nativeNext++ % (sizeof g_native / sizeof g_native[0])];
+    n.id = 0;                                                // the render thread may read it: off while the text changes
+    strncpy_s(n.text, text, _TRUNCATE); strncpy_s(n.title, title, _TRUNCATE); strncpy_s(n.detail, detail, _TRUNCATE);
+    n.asked = 0; n.ticks = 0;
+    char key[32];
+    snprintf(key, sizeof key, "mm_camp_notice_%u", ++serial);   // one id per message: a queued one is drawn after the next is made
+    unsigned id = WsJenkinsHash(key), empty = WsJenkinsHash("gui_empty");
+    alignas(8) uint8_t m[0x40] = {};
+    m[4] = NATIVE_TYPE; m[9] = m[0xA] = m[0xB] = 0xFF;
+    *(unsigned*)(m + 0x10) = empty; *(unsigned*)(m + 0x14) = id; *(unsigned*)(m + 0x18) = empty; *(unsigned*)(m + 0x1C) = empty;
+    *(float*)(m + 0x24) = 2.f; *(float*)(m + 0x38) = NATIVE_SECONDS;
+    n.id = id;
+    __try { ((void (*)(const uint8_t*, bool))A_GuiMessagePush)(m, false); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { n.id = 0; LogLine("CAMPREPOP game message: fault in GameGuiMessageQueuePush"); return false; }
+    return true;
+}
+// game thread, once per second of game time: did the game draw the message?
+static void NativeMessageCheck() {
+    for (auto& n : g_native) {
+        if (!n.id || n.ticks < 0 || ++n.ticks < NATIVE_CHECK) continue;
+        n.ticks = -1;
+        if (n.asked) LogLine("CAMPREPOP game message \"%s\" drawn (text asked %d times)", n.text, (int)n.asked);
+        else { LogLine("CAMPREPOP game message \"%s\" not drawn in %d s: overlay notice instead", n.text, NATIVE_CHECK); CampNoticeQueue(n.title, n.detail); }
+    }
+}
 static void CampNoticeNext() {
+    NativeMessageCheck();
     if (!g_noticeQueued || GetTickCount64() < g_noticeUntil) return;
     CampNoticeShow(g_noticeQueue[0].title, g_noticeQueue[0].detail, NOTICE_MS);
     g_noticeQueued--;

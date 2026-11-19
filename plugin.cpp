@@ -51,7 +51,7 @@
 // User-requested (2026-09-18): always show a visible tag for whatever
 // build is currently installed, so it's never ambiguous which test is
 // running. Bump this string every time a new test build goes out.
-#define MM_BUILD_TAG "v0.9.3-beta1r28 (2026-11-11)" MM_AUTOTEST_TAG
+#define MM_BUILD_TAG "v0.9.3-beta1 (2026-11-19b)" MM_AUTOTEST_TAG
 
 // ---- Session event log (2026-09-21) ----
 // Replaces screenshot-driven debugging: every notable event (wreck seen,
@@ -435,7 +435,6 @@ bool f1Pressed = false;
 bool enabledInvincibility = false;
 bool f2Pressed = false;
 #endif
-bool f4Pressed = false;
 bool f3Pressed = false;
 bool g_showDiagnostics = false;
 
@@ -1819,7 +1818,7 @@ static void ConvoyRespawnSweep(float elapsed, bool force) {
         t.armed = false;
         t.respawns++;
         g_totalAutoRespawns++;
-        LogLine("convoy %2d: RESPAWN triggered%s (player %.0fm from wreck, total this session %d)", i + 1, force ? " by F4/F9" : "", t.lastDistance, g_totalAutoRespawns);
+        LogLine("convoy %2d: RESPAWN triggered%s (player %.0fm from wreck, total this session %d)", i + 1, force ? " by F9" : "", t.lastDistance, g_totalAutoRespawns);
         ConvoyRouteClearWrecked(i);
     }
 }
@@ -1847,19 +1846,17 @@ static void ConvoyRespawnTick(float dt) {
     if (sinceSnapshot >= 60.0f) { sinceSnapshot = 0.0f; LogConvoySnapshot("periodic"); }
 }
 
-// Release overlay: small, silent-by-default status the mod author needs
-// (proof it's alive) without dumping internal hook plumbing on an end user.
-// F3 expands it into the full diagnostic view for troubleshooting reports.
+// Dev overlay (MM_DEV_TOOLS only). The release panel (build, convoy counts, F3/F4 help; F4 itself went too) was removed on 2026-11-19 (user: "remova o
+// overlay"): a release build draws only the camp notices (camp_notice.inc); the log keeps the status.
 #if MM_DEV_TOOLS || MM_WORLD_REPOP
 static char g_snOverlay[192];   // nearest sniper tower line (written once a second by SniperTick in camp_repop.inc)
 #endif
+#if MM_DEV_TOOLS
 class ConvoyModOverlay : public ImGuiRenderer {
 	void Render() override {
-#if MM_DEV_TOOLS
 		// Dev builds (2026-09-24): Enhanced Convoys and Wasteland Storms are
 		// released, so their status lines are gone from our own overlay -- only
-		// what is still being worked on stays. The release overlay below is
-		// what a MM_DEV_TOOLS 0 build shows.
+		// what is still being worked on stays.
 		ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_Always);
 		ImGui::Begin("Mad Max dev tools", nullptr,
 			ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
@@ -1878,86 +1875,9 @@ class ConvoyModOverlay : public ImGuiRenderer {
 		}
 		ImGui::Text("F3: %s details", g_showDiagnostics ? "hide" : "show");
 		ImGui::End();
-		return;
-#endif
-		ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_Always);
-		ImGui::Begin("Convoy Respawn Mod", nullptr,
-			ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-			ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
-
-		ImGui::Text("Build: %s", MM_BUILD_TAG);
-		ImGui::Text("Enhanced Convoys: %s  |  game check: %s", enabledConvoyNeverWrecked ? "ACTIVE" : "off", g_gameVersionStatus);
-		{
-			int wrecked = 0, armed = 0;
-			for (int i = 0; i < g_convoyPairCount; i++) { if (g_tracked[i].foundThisSweep && g_tracked[i].wrecked) wrecked++; if (g_tracked[i].armed) armed++; }
-			ImGui::Text("Convoys wrecked: %d  |  waiting to respawn: %d  |  auto-respawned this session: %d", wrecked, armed, g_totalAutoRespawns);
-		}
-		ImGui::Text("F4: respawn every destroyed convoy now (skips the random wait and the distance check)");
-		ImGui::Text("F3: show/hide diagnostics");
-
-		if (g_showDiagnostics) {
-			ImGui::Separator();
-			ImGui::Text("SetWrecked hook install: %s", g_convoySetWreckedHookInstallStatus);
-			ImGui::Text("ConvoyDataSetWrecked calls: %d", g_convoySetWreckedCalls);
-			ImGui::Text("Resolved game addresses (by byte signature):");
-			for (int i = 0; i < SIG_COUNT; i++)
-				ImGui::Text("  %-70s %s %p%s", g_sigs[i].name, g_sigs[i].matches == 1 ? "OK " : "-- ", (void*)g_sigs[i].resolved,
-					g_sigs[i].matches == 1 ? "" : (g_sigs[i].required ? "  (REQUIRED, not found)" : "  (optional, not found)"));
-			ImGui::Text("Reset ALL known convoys (F4): last run -> found %d, cleared %d, skipped(sanity) %d",
-				g_resetConvoysLastFound, g_resetConvoysLastCleared, g_resetConvoysLastSkippedSanity);
-			ImGui::Text("Escort boost: %s  |  hook %s  |  %s", g_compositionPatchStatus, g_compositionResolveHookInstallStatus, g_convoyMapStatus);
-			ImGui::Text("  ResolveConvoysComposition calls: %d  |  last id: %u (%d)  %s  |  guard entries in last profile: %d",
-				g_compositionResolveCalls, g_compositionLastId, (int)g_compositionLastId, g_compositionLastOk ? "found" : "NOT FOUND", g_compositionLastGuardEntries);
-			ImGui::Separator();
-			ImGui::Text("  AddToUpdate() calls (re-registering rebuilt graph objects): %d", g_addToUpdateCalls);
-			ImGui::Text("Respawn v2 sweep: every %.0fs (%d done)  |  delay %.0f-%.0fs after the wreck flow finishes (graph state %d)  |  player must be > %.0fm from the wreck",
-				CONVOY_RESPAWN_SWEEP_INTERVAL_S, g_sweepCount, CONVOY_RESPAWN_DELAY_MIN_S, CONVOY_RESPAWN_DELAY_MAX_S, CONVOY_GRAPH_STATE_DONE, CONVOY_RESPAWN_MIN_PLAYER_DISTANCE);
-			for (int i = 0; i < g_convoyPairCount; i++) {
-				const TrackedConvoy& t = g_tracked[i];
-				if (!t.foundThisSweep) { ImGui::Text("  convoy %2d: not found", i + 1); continue; }
-				if (!t.wrecked) { ImGui::Text("  convoy %2d: active (graph state %d)", i + 1, t.graphState); continue; }
-				if (!t.armed) { ImGui::Text("  convoy %2d: WRECKED, vanilla wreck flow still running (graph state %d) -- collect the hood ornament / let wrecks despawn", i + 1, t.graphState); continue; }
-				if (t.lastDistance < 0.0f)
-					ImGui::Text("  convoy %2d: WRECKED, respawn in %.0fs (no wreck position known, distance gate skipped)  respawns so far: %d", i + 1, t.delayRemaining, t.respawns);
-				else
-					ImGui::Text("  convoy %2d: WRECKED, respawn in %.0fs, player %.0fm from wreck (need > %.0fm)  respawns so far: %d", i + 1, t.delayRemaining, t.lastDistance, CONVOY_RESPAWN_MIN_PLAYER_DISTANCE, t.respawns);
-			}
-#if MM_DEV_TOOLS
-			ImGui::Separator();
-			ImGui::Text("[MM_DEV_TOOLS build]");
-			ImGui::Text("Pos: X=%.1f Y=%.1f Z=%.1f", g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z);
-			ImGui::Text("Invincibility (F1): %s", enabledInvincibility ? "ON" : "off");
-			ImGui::Text("SpawnStorm hook install: %s", g_spawnStormHookInstallStatus);
-			ImGui::Text("  SpawnStorm calls (natural, not caused by us): %d", g_spawnStormCalls);
-			ImGui::Text("Storms (F5 cycles): %s", g_stormPresets[g_stormPreset].name);
-			if (g_stormPreset != STORM_OFF)
-				ImGui::Text("   triggered %d  |  reached you %d  |  missed %d", g_stormTriggers, g_stormArrived, g_stormMissed);
-			ImGui::Text("   %s", g_stormToggleStatus);
-			ImGui::Text("Force one storm now, storm.trigger (F11): pressed %d time(s)", g_forceStormPresses);
-			ImGui::Text("%s", g_stormProbeStatus);
-			ImGui::Text("Current vehicle: %p  |  Signature vehicle: %p  |  %s", g_lastCurrentVehicle, g_lastSignatureVehicle,
-				(g_lastCurrentVehicle && g_lastCurrentVehicle == g_lastSignatureVehicle) ? "SAME (driving own car)" :
-				(g_lastCurrentVehicle ? "DIFFERENT (driving a captured/other car!)" : "no vehicle"));
-			ImGui::Text("Set CURRENT vehicle mass to %.0f (F6): pressed %d time(s)", g_testVehicleMass, g_setMassPresses);
-			ImGui::Text("Chassis (via GetPfxVehicle->GetChassis): %p", g_lastChassis);
-			ImGui::Text("Set CURRENT vehicle engine torque scale to %.1fx (F7): pressed %d time(s)", g_testTorqueScale, g_setTorquePresses);
-			ImGui::Text("Reset convoys + SpawnSystemReset, no area change (F8): pressed %d time(s)", g_spawnSystemResetPresses);
-			ImGui::Text("  -> watch the map/HUD Threat display before and after pressing F8");
-			ImGui::Separator();
-			ImGui::Separator();
-			ImGui::Text("Convoy graph object captures: %d  (path-hash mismatches: %d)", g_convoyGraphObjectCaptures, g_convoyGraphObjectCaptureMismatches);
-			ImGui::Text("  Last graph path hash read: %u  (expect %u for convoy_choreographer.gsr)", g_lastConvoyGraphPathHash, CONVOY_CHOREOGRAPHER_PATH_HASH);
-			ImGui::Text("  Captured graph object: %p", g_lastConvoyGraphObject);
-			ImGui::Text("F9: force the v2 respawn sweep now (bypasses delay + distance; still needs graph state 4) -- pressed %d", g_forcedSweeps);
-			if (g_lastConvoyGraphObject) {
-				ImGui::Text("  Last wrecked convoy's graph: m_State=%d  m_GraphProcessor=%p",
-					*(int*)((uintptr_t)g_lastConvoyGraphObject + 0xE0), *(void**)((uintptr_t)g_lastConvoyGraphObject + 0xF0));
-			}
-#endif
-		}
-		ImGui::End();
 	}
 };
+#endif
 #if MM_DEV_TOOLS || MM_WORLD_REPOP
 // ---- camp repopulation test (2026-10-13) --------------------------------------------------------------------------------------
 // Liberating a camp sends one event that switches off the camp's enemy location (world.bin entry *_gameplay / *_spawn, disable
@@ -1996,6 +1916,18 @@ static const CampEntry g_camps[] = {
     { 0xE46FA8A7, 0x5D82EC11, -8036.f, 2348.f, "a01_sd1240_gameplay" },
     { 0xE4BE075D, 0xBF77A52A, -5872.f, 3511.f, "a01_sd1210_spawn" },
     { 0xF8FBEA29, 0xBD19C67B, -8611.f, -407.f, "a02_sd2060_gameplay" },
+    // r43 (user 2026-11-17: "pode incluir os 7 acampamentos"): the valuable_vehicle and food_depot camps, same layout and the same
+    // completion graph as the ones above; tools/repopulate_table.py had read only scrap_depot / fuel_depot / warchief_camp. Their centre
+    // is the middle of their character spawn points, not the location's origin (r43 autotests: Black Cove's origin is 124 m from its
+    // camp, 7 points 150-176 m away never spawned; Overlook kept one at 123 m; Jugular Canyon's origin is under the camp, the player fell
+    // through the world)
+    { 0x213A5DA6, 0x910C6C96, -5420.f, 4244.f, "a01_vv1050_gameplay" },
+    { 0x3B84A609, 0x7FEEFD62, -7639.f, -1083.f, "a02_fo2040_gameplay" },
+    { 0x81CFB36E, 0x2CEAF401, -6887.f, 884.f, "a02_fo2020_gameplay" },
+    { 0x9FBD2D25, 0xE8988FE0, -5660.f, -1263.f, "a02_vv2020_spawn" },
+    { 0xB7A6D39A, 0x22AC50F1, -9285.f, 4827.f, "a01_vv1110_gameplay" },
+    { 0xE630E231, 0x7EDE3DDB, -6857.f, 3541.f, "a01_vv1060_gameplay" },
+    { 0xE762AD41, 0xD3DE5E6A, -6237.f, 4771.f, "a01_vv1080_gameplay" },
 #if MM_DEV_TOOLS
     // warchief camps (Top Dog strongholds, 2026-10-16 test): same layout, enemy part without collectibles (repopulate_table.py)
     { 0x0E77AB96, 0xF23C43C9, -8026.f, 4138.f, "a01_wc1050_gameplay" },
@@ -2027,6 +1959,8 @@ static int LocEnabled(unsigned id, int* loaded) {
     for (int i = 0; i < n; i++) { if (l[i][0x67] & 1) on++; if (l[i][0x67] & 4) (*loaded)++; }
     return n == 0 ? -1 : on == 0 ? 0 : on == n ? 1 : 2;
 }
+
+static volatile LONG g_saveLoads;      // saves loaded this session (camp_repop.inc LocLoadStatus; the game reloads one when the player dies)
 
 static float CampDistance(const CampEntry& c) {
     float dx = g_PlayerPos.x - c.x, dz = g_PlayerPos.z - c.z;
@@ -2103,10 +2037,12 @@ static void CampRepopulateNearest() {
 // <camp>", "kill", "log"). After the last one the log says AUTOTEST done (the test driver then closes the game). Used to test location
 // changes and camp repopulation without the user (e.g. camp -> far away -> camp again, to force a reload).
 static void AutotestCampCommand(const char* cmd);
+static void AutotestDie(CCharacter* ch);
 struct AutoWp { float p[3], secs; bool ground; char cmd[40]; };
 static int g_autotest = -1;                      // -1 unknown, 0 off, 1 waiting, 2 running, 3 done
 static AutoWp g_autoWp[24]; static int g_autoN = 0, g_autoI = 0;
 static float g_autoClock = 0.f, g_autoLog = 0.f; static bool g_autoCmdDone;
+static LONG g_autoDiedAt = -1;                   // "die": g_saveLoads when the player was killed; nothing runs until the next load
 typedef float (*TerrainHeightFn)(const void* terrain, const float* p);
 static const TerrainHeightFn TerrainBilinearHeight = (TerrainHeightFn)0x14078BCF0;   // CTerrainMapBase::GetBilinearHeight(const CVector3f&)
 typedef float (*GroundHeightFn)(const float* p);
@@ -2176,6 +2112,11 @@ static void AutotestTick(CCharacter* ch, float dt) {
         }
     }
     if (g_autotest <= 0 || g_autotest == 3 || !ch) return;
+    if (g_autoDiedAt >= 0) {
+        if (g_saveLoads == g_autoDiedAt) return;         // dying, death screen: no invulnerability, no waypoint
+        LogLine("AUTOTEST save loaded after the death (%d loads), player at %.1f %.1f %.1f", (int)g_saveLoads, g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z);
+        g_autoDiedAt = -1;
+    }
     g_autoClock += dt;
     ch->m_Invulnerable = true;
     // god mode and E3 invulnerability too (CDamageable +0xE9 / +0xEA: SetHealth keeps 0.1 at least): a whole camp killed the player
@@ -2192,7 +2133,11 @@ static void AutotestTick(CCharacter* ch, float dt) {
     }
     AutoWp& w = g_autoWp[g_autoI];
     if (g_autoClock < 8.f) AutotestHold(ch, veh, w);
-    else if (!g_autoCmdDone) { g_autoCmdDone = true; if (w.cmd[0]) AutotestCampCommand(w.cmd); }
+    else if (!g_autoCmdDone) {
+        g_autoCmdDone = true;
+        if (!strcmp(w.cmd, "die")) { AutotestDie(ch); return; }
+        if (w.cmd[0]) AutotestCampCommand(w.cmd);
+    }
     g_autoLog += dt;
     if (g_autoLog >= 5.f) { g_autoLog = 0.f; LogLine("AUTOTEST wp %d +%.0fs player at %.1f %.1f %.1f", g_autoI + 1, g_autoClock, g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z); }
     if (g_autoClock >= w.secs) {
@@ -2203,7 +2148,9 @@ static void AutotestTick(CCharacter* ch, float dt) {
 }
 #endif
 
+#if MM_DEV_TOOLS
 static ConvoyModOverlay g_convoyModOverlay;
+#endif
 #if MM_DEV_TOOLS || MM_WORLD_REPOP
 static bool g_worldRepopOn = false;     // set in PluginHooks: only on the GOG build whose addresses camp_repop.inc uses
 #include "camp_repop.inc"
@@ -2255,6 +2202,7 @@ DEFHOOK(void, CPlayer__UpdateController, (void* thiz, float dt)) {
 
     static CVector3f savePos;
 
+#if MM_DEV_TOOLS
     if (GetAsyncKeyState(VK_F3) & 0x8000) {
         if (!f3Pressed) {
             f3Pressed = true;
@@ -2264,22 +2212,10 @@ DEFHOOK(void, CPlayer__UpdateController, (void* thiz, float dt)) {
     else {
         f3Pressed = false;
     }
+#endif
 
-    if (GetAsyncKeyState(VK_F4) & 0x8000) {
-        if (!f4Pressed) {
-            f4Pressed = true;
-            // v2: F4 is the same forced sweep as the dev F9 -- respawn every
-            // convoy whose wreck flow has finished, skipping the wait and the
-            // distance gate. It no longer clears flags on convoys whose wreck
-            // handler is still running (that would break the hood-ornament
-            // flow; see the SetWrecked hook comment).
-            g_forcedSweeps++;
-            ConvoyRespawnSweep(0.0f, true);
-        }
-    }
-    else {
-        f4Pressed = false;
-    }
+    // F4 (respawn every finished convoy now, the release twin of the dev F9) was removed on 2026-11-19 (user: "pode remover a função
+    // de spawn dos convoys", the F4 key only): convoys come back by the timed sweep alone.
 
 #if MM_DEV_TOOLS
     if (GetAsyncKeyState(VK_RSHIFT) & 0x8000) {
@@ -2510,12 +2446,48 @@ void PluginHooks() {
         MH_STATUS c = MH_CreateHook((LPVOID)0x1406393B0, (LPVOID)LocSaveStatus_hook, (LPVOID*)&LocSaveStatus_orig);
         MH_STATUS e = c == MH_OK ? MH_EnableHook((LPVOID)0x1406393B0) : c;
         LogLine("camp repopulation: save-status hook %s", MH_StatusToString(e));
+        MH_STATUS cl = MH_CreateHook((LPVOID)A_LocLoadStatus, (LPVOID)LocLoadStatus_hook, (LPVOID*)&LocLoadStatus_orig);
+        MH_STATUS el = cl == MH_OK ? MH_EnableHook((LPVOID)A_LocLoadStatus) : cl;
+        LogLine("camp repopulation: load-status hook (held camps after a save load) %s", MH_StatusToString(el));
         MH_STATUS c2 = MH_CreateHook((LPVOID)A_DestructibleLoad, (LPVOID)DestructibleLoad_hook, (LPVOID*)&DestructibleLoad_orig);
         MH_STATUS e2 = c2 == MH_OK ? MH_EnableHook((LPVOID)A_DestructibleLoad) : c2;
-        LogLine("camp repopulation: destructible-load hook (War Criers) %s", MH_StatusToString(e2));
+        LogLine("camp repopulation: destructible load hook (sniper towers) %s", MH_StatusToString(e2));
         MH_STATUS c3 = MH_CreateHook((LPVOID)A_TargetSave, (LPVOID)TargetSave_hook, (LPVOID*)&TargetSave_orig);
         MH_STATUS e3 = c3 == MH_OK ? MH_EnableHook((LPVOID)A_TargetSave) : c3;
         LogLine("sniper repopulation: harpoon-target save hook %s", MH_StatusToString(e3));
+        MH_STATUS cg = MH_CreateHook((LPVOID)A_GraphScriptHandleEvent, (LPVOID)GraphScriptHandleEvent_hook, (LPVOID*)&GraphScriptHandleEvent_orig);
+        MH_STATUS eg = cg == MH_OK ? MH_EnableHook((LPVOID)A_GraphScriptHandleEvent) : cg;
+        LogLine("camp repopulation: completion graph hook %s", MH_StatusToString(eg));
+        MH_STATUS mf[3]; const uintptr_t mfAt[3] = { A_RouterLoad, A_CountTriggerLoad, A_LootBagLoad };
+        LPVOID mfHook[3] = { (LPVOID)RouterLoad_hook, (LPVOID)CountTriggerLoad_hook, (LPVOID)LootBagLoad_hook };
+        LPVOID* mfOrig[3] = { (LPVOID*)&RouterLoad_orig, (LPVOID*)&CountTriggerLoad_orig, (LPVOID*)&LootBagLoad_orig };
+        for (int k = 0; k < 3; k++) { MH_STATUS c = MH_CreateHook((LPVOID)mfAt[k], mfHook[k], mfOrig[k]); mf[k] = c == MH_OK ? MH_EnableHook((LPVOID)mfAt[k]) : c; }
+        LogLine("minefield repopulation: router / count trigger / loot bag load hooks %s, %s, %s", MH_StatusToString(mf[0]), MH_StatusToString(mf[1]), MH_StatusToString(mf[2]));
+#if MM_POINT_DIAG
+        MH_STATUS cp = MH_CreateHook((LPVOID)A_SpawnPointEnable, (LPVOID)SpawnPointEnable_hook, (LPVOID*)&SpawnPointEnable_orig);
+        MH_STATUS ep = cp == MH_OK ? MH_EnableHook((LPVOID)A_SpawnPointEnable) : cp;
+        LogLine("camp diagnostic: spawn point enable hook %s", MH_StatusToString(ep));
+        MH_STATUS cl = MH_CreateHook((LPVOID)A_LocInfoHandleEvent, (LPVOID)LocInfoHandleEvent_hook, (LPVOID*)&LocInfoHandleEvent_orig);
+        MH_STATUS el = cl == MH_OK ? MH_EnableHook((LPVOID)A_LocInfoHandleEvent) : cl;
+        LogLine("camp diagnostic: location event hook %s", MH_StatusToString(el));
+        MH_STATUS ev[2]; const uintptr_t evAt[2] = { A_EventSystemPost, A_EventImplSend };
+        LPVOID evHook[2] = { (LPVOID)EventSystemPost_hook, (LPVOID)EventImplSend_hook };
+        LPVOID* evOrig[2] = { (LPVOID*)&EventSystemPost_orig, (LPVOID*)&EventImplSend_orig };
+        for (int k = 0; k < 2; k++) { MH_STATUS c = MH_CreateHook((LPVOID)evAt[k], evHook[k], evOrig[k]); ev[k] = c == MH_OK ? MH_EnableHook((LPVOID)evAt[k]) : c; }
+        LogLine("camp diagnostic: event post / send hooks %s, %s", MH_StatusToString(ev[0]), MH_StatusToString(ev[1]));
+        MH_STATUS fp[2]; const uintptr_t fpAt[2] = { A_ForcePulseExplode, A_ForcePulseExplodeObject };
+        LPVOID fpHook[2] = { (LPVOID)ForcePulseExplode_hook, (LPVOID)ForcePulseExplodeObject_hook };
+        LPVOID* fpOrig[2] = { (LPVOID*)&ForcePulseExplode_orig, (LPVOID*)&ForcePulseExplodeObject_orig };
+        for (int k = 0; k < 2; k++) { MH_STATUS c = MH_CreateHook((LPVOID)fpAt[k], fpHook[k], fpOrig[k]); fp[k] = c == MH_OK ? MH_EnableHook((LPVOID)fpAt[k]) : c; }
+        LogLine("camp diagnostic: force pulse explode / explode object hooks %s, %s", MH_StatusToString(fp[0]), MH_StatusToString(fp[1]));
+#endif
+#if MF_DIAG
+        MH_STATUS md[2]; const uintptr_t mdAt[2] = { A_RouterHandleEvent, A_SaveOnDestroy };
+        LPVOID mdHook[2] = { (LPVOID)RouterHandleEvent_hook, (LPVOID)SaveOnDestroy_hook };
+        LPVOID* mdOrig[2] = { (LPVOID*)&RouterHandleEvent_orig, (LPVOID*)&SaveOnDestroy_orig };
+        for (int k = 0; k < 2; k++) { MH_STATUS c = MH_CreateHook((LPVOID)mdAt[k], mdHook[k], mdOrig[k]); md[k] = c == MH_OK ? MH_EnableHook((LPVOID)mdAt[k]) : c; }
+        LogLine("minefield diagnostic: router event / save-on-destroy hooks %s, %s", MH_StatusToString(md[0]), MH_StatusToString(md[1]));
+#endif
         MH_STATUS c4 = MH_CreateHook((LPVOID)A_LocMainDone, (LPVOID)LocMainDone_hook, (LPVOID*)&LocMainDone_orig);
         MH_STATUS e4 = c4 == MH_OK ? MH_EnableHook((LPVOID)A_LocMainDone) : c4;
         LogLine("camp repopulation: map icon hook %s", MH_StatusToString(e4));
@@ -2524,30 +2496,36 @@ void PluginHooks() {
         MH_STATUS c6 = MH_CreateHook((LPVOID)A_GuiLocalizedText, (LPVOID)GuiLocalizedText_hook, (LPVOID*)&GuiLocalizedText_orig);
         MH_STATUS e6 = c6 == MH_OK ? MH_EnableHook((LPVOID)A_GuiLocalizedText) : c6;
         LogLine("camp repopulation: banner hooks %s, %s", MH_StatusToString(e5), MH_StatusToString(e6));
+        MH_STATUS c7 = MH_CreateHook((LPVOID)A_LocatorGetStringRaw, (LPVOID)LocatorGetStringRaw_hook, (LPVOID*)&LocatorGetStringRaw_orig);
+        MH_STATUS e7 = c7 == MH_OK ? MH_EnableHook((LPVOID)A_LocatorGetStringRaw) : c7;
+        g_nativeOn = e7 == MH_OK;
+        LogLine("camp repopulation: game message text hook %s", MH_StatusToString(e7));
         CampNoticeInit();
         LogLine("camp repopulation: bodies stay %.0f s: %s", REPOP_BODY_SECONDS, RepopBodyTimePatch() ? "patched" : "NOT patched (unexpected bytes)");
         ThreatDiagInstall();
         FILE* f = nullptr; char path[MAX_PATH]; GetModuleFileNameA(NULL, path, MAX_PATH);
         char* sl = strrchr(path, '\\'); if (sl) sl[1] = 0;
-        {   // test switch: Top Dogs / warchiefs come back with their camp
-            char tp[MAX_PATH]; strcpy_s(tp, path); strcat_s(tp, "scripts\\repop_topdogs.txt");
-            g_topDogsBack = GetFileAttributesA(tp) != INVALID_FILE_ATTRIBUTES;
-            LogLine("camp repopulation: Top Dogs %s", g_topDogsBack ? "COME BACK (repop_topdogs.txt)" : "stay dead");
-            // The Top Dog's death must run the camp completion: in a warchief camp it is what opens the arena gates (base object
-            // "05_open_gates_trigger (camp_completed)"). The earlier completion-event filter dropped top_dog.camp_complete too and
-            // trapped the player in the arena (user test 2026-10-16 wc1020). So completion now runs normally when a revived Top Dog
-            // dies (the "liberated" notice shows again; harmless). The event-send hook is kept in the source but not installed.
-            (void)A_EventSend; (void)&EventSend_hook; (void)EventSend_orig;
+        {   // r44: Top Dogs come back with their camp (sd1300 Stump Grinder, sd1210 Rim Jobbie; the warchief camps are dev only)
+            // In a warchief camp the Top Dog's death is what opens the arena gates (base object "05_open_gates_trigger (camp_completed)"):
+            // dropping its completion trapped the player there (user test 2026-10-16 wc1020). The two scrap depots have no arena: their
+            // completion events are dropped while the camp is held and the player is near it, and the mod's own count retakes the camp.
+            MH_STATUS c8 = MH_CreateHook((LPVOID)A_EventSend, (LPVOID)EventSend_hook, (LPVOID*)&EventSend_orig);
+            MH_STATUS e8 = c8 == MH_OK ? MH_EnableHook((LPVOID)A_EventSend) : c8;
+            if (e8 != MH_OK) g_topDogsBack = false;   // without the filter a Top Dog's death would complete the camp: keep them dead
+            LogLine("camp repopulation: Top Dogs %s (event filter %s)", g_topDogsBack ? "come back" : "stay dead", MH_StatusToString(e8));
         }
-        strcat_s(path, "scripts\\repop_test.txt");             // test override: "cooldown_min_s cooldown_max_s [part of a camp name, it takes the next attack]"
+        strcat_s(path, "scripts\\repop_test.txt");             // test override: "cooldown_min_s cooldown_max_s [parts of camp names, they take the next attacks in this order]"
         if (fopen_s(&f, path, "r") == 0 && f) {
             float a = 0, b = 0;
+            char first[8 * 17] = "";
             if (fscanf_s(f, "%f %f", &a, &b) == 2 && a >= 0 && b >= a) {
                 g_repopCooldownMin = g_repopAttackMin = a; g_repopCooldownMax = g_repopAttackMax = b;
-                if (fscanf_s(f, "%15s", g_repopFirstCamp, (unsigned)sizeof g_repopFirstCamp) != 1) g_repopFirstCamp[0] = 0;
+                while (g_repopFirstN < 8 && fscanf_s(f, "%15s", g_repopFirstCamp[g_repopFirstN], (unsigned)sizeof g_repopFirstCamp[0]) == 1) {
+                    strcat_s(first, " "); strcat_s(first, g_repopFirstCamp[g_repopFirstN++]);
+                }
             }
             fclose(f);
-            LogLine("camp repopulation: test cooldown %.0f-%.0f s%s%s", g_repopCooldownMin, g_repopCooldownMax, g_repopFirstCamp[0] ? ", next attack on " : "", g_repopFirstCamp);
+            LogLine("camp repopulation: test cooldown %.0f-%.0f s%s%s", g_repopCooldownMin, g_repopCooldownMax, g_repopFirstN ? ", next attacks on" : "", first);
         }
     }
 #endif
