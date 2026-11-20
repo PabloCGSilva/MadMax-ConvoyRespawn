@@ -58,9 +58,7 @@ static const unsigned g_campBase[] = { 0x180ADBF7, 0x2D040BA1, 0x83BE25A8, 0x3F8
     0x8018A9C0, 0x8008BC49, 0x6A68D9E2, 0xC02B00B7, 0xC462A6F4, 0x8BFA79BB, 0x0E59D6EB, 0xDF5C7DED, 0xD3ECCCEA, 0x03C2A561, 0x211103FC,
     0x04954B61, 0xC75D913A, 0x269F62CB, 0xEEC1F583, 0x7628D67A,
     0x26FDD987, 0xFC6A241B, 0xC500C861, 0x2C2DE2B6, 0xF8046095, 0x7565F5EB, 0x7F694C70   // r43: vv1050_camp, fo2040, fo2020, vv2020, vv1110, vv1060, vv1080
-#if MM_DEV_TOOLS
-    , 0x12DD44F1, 0x13D3757A, 0x77A8A17F, 0x61D964F9            // warchief camps: a01_wc1050, a02_wc2040, a01_wc1020_camp, a02_wc2020
-#endif
+    , 0x12DD44F1, 0x13D3757A, 0x77A8A17F, 0x61D964F9            // warchief camps: a01_wc1050, a02_wc2040, a01_wc1020_camp, a02_wc2020 (r47: release too)
 };
 static_assert(sizeof g_campBase / sizeof g_campBase[0] == sizeof g_camps / sizeof g_camps[0], "g_campBase must match g_camps");
 // each camp's SLocationInfoEntry key (+0x30): global/location_info, the enemy camp entry nearest to the camp (1-105 m, next one 78 m or more away). Same order as g_camps.
@@ -70,9 +68,7 @@ static const unsigned g_campLocKey[] = { 0x2CE4BEDC, 0x95976E7E, 0x1E87AF5B, 0x2
     // r43: Overlook (107 m), Skull Top, Havoc Point, Twin Sisters, Scorched Sand, Jugular Canyon (96 m: the nearer entry, 62 m, is
     // Debris Site, type 9, no camp), Black Cove
     0xB8BA74D8, 0xFC107996, 0x6A92820A, 0x83D3B23F, 0x3CAD37C2, 0x401765F4, 0x3B66AA1A
-#if MM_DEV_TOOLS
-    , 0x25B1896C, 0xE2DC276D, 0xBABF660A, 0xFBCB4761            // warchief camps
-#endif
+    , 0x25B1896C, 0xE2DC276D, 0xBABF660A, 0xFBCB4761            // warchief camps (r47: release too)
 };
 static_assert(sizeof g_campLocKey / sizeof g_campLocKey[0] == sizeof g_camps / sizeof g_camps[0], "g_campLocKey must match g_camps");
 
@@ -119,8 +115,9 @@ static bool CampItemsDone(int i) {
 // 0x582F2735 wc2020 Cocka Locka. Test switch: <game>\scripts\repop_topdogs.txt brings them back too (g_topDogsBack); when one is
 // killed the game re-runs the camp completion and switches the enemy location off -> the camp goes to CLEARED (civilians return).
 // r46: Rim Jobbie was 0xD73AB55E, an id no spawn point has (user test 2026-11-19: he was counted as a plain enemy, D73B025E)
+// r47: the four warchief ids above were wrong the same way; the .blo spawn points are 93C567FE, C1237D96, 897CCB67, 582F4035
 static const unsigned g_topDogSpawnPoints[] = { 0x583D5194 /* sd1300 Stump Grinder */, 0xD73B025E /* sd1210 Rim Jobbie */,
-    0x93C5A6FE, 0xC1238E96, 0x897C8F67, 0x582F2735 };
+    0x93C567FE /* wc1050 Gut Noose */, 0xC1237D96 /* wc2040 Pig n Sticker */, 0x897CCB67 /* wc1020 Gaspa Grope */, 0x582F4035 /* wc2020 Cocka Locka */ };
 // r44 (user 2026-11-18: "sim os top dogs devem voltar. apenas cuidar para que a morte deles não conte como um trigger para a retomada"):
 // they come back by default; their death is one more kill of the mod's count, and its completion events are dropped (EventSend_hook)
 static bool g_topDogsBack = true;
@@ -161,14 +158,16 @@ static float LootDistance(const LootEntry& e) { float dx = g_PlayerPos.x - e.x, 
 
 enum RepopState { RP_IDLE = 0, RP_PENDING, RP_ACTIVE, RP_CLEARED };
 static const char* RP_NAMES[] = { "idle", "pending", "active", "cleared" };
-struct RepopCamp { int state; float cooldown; bool revived; int revivedCount; unsigned revivedIds[32]; bool forced; bool cycleStarted;
+// r47: up to REPOP_TRACK spawn points per camp (Proving Grounds a01_wc1050_gameplay has 45, 40 of them characters; 32 dropped Gut Noose's)
+static const int REPOP_TRACK = 64;
+struct RepopCamp { int state; float cooldown; bool revived; int revivedCount; unsigned revivedIds[REPOP_TRACK]; bool forced; bool cycleStarted;
                    int baseCount; unsigned baseIds[16]; bool baseDone; float baseWait;
                    float baseNoLive[16]; uint8_t baseLost[16]; unsigned baseIgnored;   // per base guard: seconds with no enemy / asked again / not counted
-                   int towerCount; unsigned towerIds[16]; unsigned spawnedMask;   // lookout tower parts (diagnostic)
-                   unsigned liveMask; unsigned ignoredMask; float noLive[32];   // per tracked point: had an entity / never spawns / seconds with no entity
-                   float liveTime[32]; uint8_t lost[32];                        // per tracked point: seconds its current entity has been there / short lives so far
-                   int deadCount; unsigned deadIds[48]; bool armed;             // killed in this repopulation (kept when the player leaves and returns); 370 m points done
-                   unsigned lookoutMask;                                        // tracked points that are lookouts (spawn distance over 100 m): the game spawns them, see SpawnEntityChars
+                   int towerCount; unsigned towerIds[16]; uint64_t spawnedMask;   // lookout tower parts (diagnostic)
+                   uint64_t liveMask; uint64_t ignoredMask; float noLive[REPOP_TRACK];   // per tracked point: had an entity / never spawns / seconds with no entity
+                   float liveTime[REPOP_TRACK]; uint8_t lost[REPOP_TRACK];                        // per tracked point: seconds its current entity has been there / short lives so far
+                   int deadCount; unsigned deadIds[80]; bool armed;             // killed in this repopulation (kept when the player leaves and returns); 370 m points done
+                   uint64_t lookoutMask;                                        // tracked points that are lookouts (spawn distance over 100 m): the game spawns them, see SpawnEntityChars
                    unsigned topDog; };                                          // r44: the camp's Top Dog spawn point, tracked like the others (0: none)
 static volatile LONG g_repopSaving;   // set while the save hook has the flags flipped (the save may run on another thread)
 static RepopCamp g_repop[sizeof g_camps / sizeof g_camps[0]];
@@ -179,23 +178,94 @@ static bool RepopIsDead(const RepopCamp& r, unsigned id) {
 // r46 (user test 2026-11-19, Large Blade: "ao derrotar o top dog, as manivelas para desligar o fogo da arena não ficaram disponíveis,
 // então fiquei preso"): the Top Dog intro (a01_sd1210_spawn evt.skipped / its sequence) lights the arena's two flame pipes; the valves
 // (evt.action) put them out with a01_sd1210.flame_pipe_{left,right}.off (A980C7AF / D6D84B89, Jenkins confirmed), which the base
-// location's EventTrigger_FlameOff objects listen to. Why the valves were not usable is not known; the mod sends the same events when
-// the Top Dog dies. SendMsg turns each name into SEventID(hash, 0), the same id the valves send.
-static const struct { const char* camp; const char* events; } g_topDogArenaOff[] = {
-    { "sd1210", "a01_sd1210.flame_pipe_left.off a01_sd1210.flame_pipe_right.off" },
+// location's EventTrigger_FlameOff objects listen to. SendMsg turns each name into SEventID(hash, 0), the same id the valves send.
+// r48 (user 2026-11-20, after the r47 test where Gasworks' valves were usable: "1 - mas pode diminuir o tempo para 1 min"): the valves
+// (max.interaction A59513C8, entry.usable) are made usable by the base's evt.top_dog_dead, which listens to BAA9AE93 (scope 0). Rim
+// Jobbie's death does not send it (his on-death list: D49D0730 868D48E1 400BC781 E321E903) and no sd1210 file does: it most likely comes
+// after the camp completion the mod blocks (Gaspa Grope sends his camp's B2F680F5 himself). The mod sends BAA9AE93 when the Top Dog
+// dies and puts the flames out the r46 way when no valve was turned within ARENA_FALLBACK game seconds.
+static const struct { const char* camp; unsigned valvesOn; unsigned valveOff[2]; const char* flamesOff; } g_topDogArena[] = {
+    { "sd1210", 0xBAA9AE93, { 0xA980C7AF, 0xD6D84B89 }, "a01_sd1210.flame_pipe_left.off a01_sd1210.flame_pipe_right.off" },
 };
+static const float ARENA_FALLBACK = 60.f;
+static struct { int camp; int arena; float left; } g_arenaWait = { -1, -1, 0.f };
+static volatile LONG g_valvesTurned;   // bit k: valveOff[k] seen by EventSend_hook since the valves were made usable
+static volatile LONG g_arenaOwnSend;   // set while the mod sends an arena event itself (EventSend_hook sees those too)
 static const uintptr_t A_SendEventMsg = 0x140007CA0;   // NEvent::CSendEvent<...>::SendMsg(const char*)
+// r47 (user 2026-11-19: "pode fazer o r47"): a warchief camp's arena gate opens from the base location's 04_camp_completed (CEventTrigger,
+// listens to 87545B6C, sent at the end of the camp completion that the warchief's death starts: user test 2026-10-16 wc1020, the filter
+// dropped it and the gates stayed shut). Its three global events, the camp's own: open the gate, enable 05_open_gates_trigger, destroy
+// the restricted gate. The mod sends them itself when the warchief dies; no name is known, so they go by id through
+// CEventSystem::SendEvent, as SendMsg does after GetEventsFromString (SEventID = { hash, scope }, scope 0xFFFFFFFF = the .blo's global ones).
+static const struct { const char* camp; unsigned events[3]; } g_warchiefGates[] = {
+    { "wc1020", { 0x375C946E, 0x67C001BE, 0x23E4B827 } },   // Gasworks
+    { "wc1050", { 0x72A5A43F, 0x43FE29AF, 0x4F4CEB62 } },   // Proving Grounds
+    { "wc2020", { 0x0466F222, 0x46E3CA32, 0xEB1DF9B1 } },   // The Drop
+    { "wc2040", { 0x92DE580A, 0xDBA08BCA, 0xE69EFF1A } },   // Tyrant's Lash
+};
+static const uintptr_t A_EventSystemSendEvent = 0x1409C3150;   // CEventSystem::SendEvent(this, const SEventID*, int, CEventData*)
+static const uintptr_t A_EventSystemInstance = 0x1417116D8;    // CAvaSingle<CEventSystem>::Instance
+static bool SendEventIds(const unsigned* hashes, int n, unsigned scope) {
+    unsigned ids[2 * 8];
+    if (n > 8) n = 8;
+    for (int k = 0; k < n; k++) { ids[2 * k] = hashes[k]; ids[2 * k + 1] = scope; }
+    uint64_t data[6] = { 0xFFFFFFFFFFull, 0, 0, 0, 0, 0 };
+    __try {
+        void* sys = *(void* const*)A_EventSystemInstance;
+        if (!sys) return false;
+        ((void (*)(void*, const void*, int, void*))A_EventSystemSendEvent)(sys, ids, n, data);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    return true;
+}
+static bool ArenaFlamesOff(int a) {
+    bool ok = true;
+    InterlockedExchange(&g_arenaOwnSend, 1);
+    __try { ((void (*)(const char*))A_SendEventMsg)(g_topDogArena[a].flamesOff); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+    InterlockedExchange(&g_arenaOwnSend, 0);
+    return ok;
+}
 static void TopDogArenaOff(int i, const char* why) {
-    for (auto& a : g_topDogArenaOff) {
-        if (!strstr(g_camps[i].name, a.camp)) continue;
-        bool ok = true;
-        __try { ((void (*)(const char*))A_SendEventMsg)(a.events); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
-        LogLine("CAMPREPOP %s: %s -> arena flames %s (%s)", g_camps[i].name, why, ok ? "switched off" : "NOT switched off, the call failed", a.events);
+    for (int a = 0; a < (int)(sizeof g_topDogArena / sizeof g_topDogArena[0]); a++) {
+        if (!strstr(g_camps[i].name, g_topDogArena[a].camp)) continue;
+        InterlockedExchange(&g_valvesTurned, 0);
+        InterlockedExchange(&g_arenaOwnSend, 1);
+        bool ok = SendEventIds(&g_topDogArena[a].valvesOn, 1, 0);
+        InterlockedExchange(&g_arenaOwnSend, 0);
+        if (ok) {
+            g_arenaWait.camp = i; g_arenaWait.arena = a; g_arenaWait.left = ARENA_FALLBACK;
+            LogLine("CAMPREPOP %s: %s -> arena valves made usable (event %08X), flames put out by the mod in %.0f s if no valve is turned",
+                g_camps[i].name, why, g_topDogArena[a].valvesOn, ARENA_FALLBACK);
+        } else {
+            bool off = ArenaFlamesOff(a);
+            LogLine("CAMPREPOP %s: %s -> valves event NOT sent, the call failed; arena flames %s (%s)", g_camps[i].name, why,
+                off ? "switched off" : "NOT switched off, the call failed", g_topDogArena[a].flamesOff);
+        }
     }
+    for (auto& g : g_warchiefGates) {
+        if (!strstr(g_camps[i].name, g.camp)) continue;
+        bool ok = SendEventIds(g.events, 3, 0xFFFFFFFFu);
+        LogLine("CAMPREPOP %s: %s -> arena gate %s (events %08X %08X %08X)", g_camps[i].name, why, ok ? "opened" : "NOT opened, the call failed",
+            g.events[0], g.events[1], g.events[2]);
+    }
+}
+// r48: the fallback of TopDogArenaOff (RepopTick, game seconds)
+static void ArenaTick(float step) {
+    if (g_arenaWait.camp < 0) return;
+    int i = g_arenaWait.camp, a = g_arenaWait.arena;
+    if ((g_valvesTurned & 3) == 3) {
+        LogLine("CAMPREPOP %s: both arena valves turned by the player", g_camps[i].name);
+        g_arenaWait.camp = -1;
+        return;
+    }
+    if ((g_arenaWait.left -= step) > 0.f) return;
+    bool ok = ArenaFlamesOff(a);
+    LogLine("CAMPREPOP %s: %s valve turned in %.0f s -> arena flames %s (%s)", g_camps[i].name, g_valvesTurned ? "one" : "no", ARENA_FALLBACK,
+        ok ? "switched off by the mod" : "NOT switched off, the call failed", g_topDogArena[a].flamesOff);
+    g_arenaWait.camp = -1;
 }
 static void RepopRememberDead(RepopCamp& r, unsigned id) {
     if (RepopIsDead(r, id)) return;
-    if (r.deadCount < 48) r.deadIds[r.deadCount++] = id;
+    if (r.deadCount < 80) r.deadIds[r.deadCount++] = id;
     if (id && id == r.topDog) {
         int i = (int)(&r - g_repop);
         LogLine("CAMPREPOP %s: Top Dog %08X dead", g_camps[i].name, id);
@@ -203,7 +273,7 @@ static void RepopRememberDead(RepopCamp& r, unsigned id) {
     }
 }
 static void RepopTrackLookout(RepopCamp& r, unsigned id) {
-    if (r.revivedCount < 32) { r.lookoutMask |= 1u << r.revivedCount; r.revivedIds[r.revivedCount++] = id; }
+    if (r.revivedCount < REPOP_TRACK) { r.lookoutMask |= 1ull << r.revivedCount; r.revivedIds[r.revivedCount++] = id; }
 }
 
 // Spawn budget: CSpawnedEntityHandler counts the dead too (+0x1667 used characters, +0x1669 limit). Over the limit it flags every dead entity for despawn and takes
@@ -305,7 +375,10 @@ static void GuiLocalizedText_hook(uint8_t* font, void* out, bool* system) {
 static const uintptr_t A_EventSend = 0x1409C25D0;
 typedef void (*EventSendFn)(void*, void*);
 static EventSendFn EventSend_orig = nullptr;
-static const unsigned g_topDogCompletion[] = { 0x868D48E1, 0x400BC781, 0xB2F680F5, 0x4B8A1508, 0xCD9CA9DC, 0x870DD82C };
+// r47: the four evt.top_dog_dead events go through: in every warchief camp their only listeners are evt.top_dog_dead triggers that make
+// the arena's valve interactions usable (entry.usable of mmax_turn_valve contexts): dropped, the valves would stay unusable like
+// Large Blade's did (user 2026-11-19; why: see g_topDogArena)
+static const unsigned g_topDogCompletion[] = { 0x868D48E1, 0x400BC781 };
 static volatile LONG g_topDogBlocked = 0;
 // r44: only while a held camp whose Top Dog is back has the player within REPOP_LOAD (the events carry no camp: the first liberation of
 // another Top Dog camp must still complete; the 2026-10-16 filter dropped them whenever any camp was held)
@@ -316,10 +389,25 @@ static bool TopDogCampHeldNear() {
     }
     return false;
 }
+// r48: the arena events seen: the valves turned (valveOff) and whether the game sends valvesOn itself (unknown, see g_topDogArena)
+static volatile LONG g_arenaSeenLogs;
+static void ArenaEventSeen(unsigned a, unsigned b) {
+    if (g_arenaOwnSend) return;
+    for (auto& t : g_topDogArena) {
+        if ((a == t.valvesOn || b == t.valvesOn) && InterlockedIncrement(&g_arenaSeenLogs) <= 20)
+            LogLine("CAMPREPOP arena: the game sent the valves event %08X itself (%s)", t.valvesOn, t.camp);
+        for (int k = 0; k < 2; k++)
+            if (a == t.valveOff[k] || b == t.valveOff[k]) {
+                InterlockedOr(&g_valvesTurned, 1 << k);
+                if (InterlockedIncrement(&g_arenaSeenLogs) <= 20) LogLine("CAMPREPOP arena: %s valve turned (event %08X, %s)", k ? "right" : "left", t.valveOff[k], t.camp);
+            }
+    }
+}
 static void EventSend_hook(void* e, void* data) {
+    unsigned a = 0, b = 0;
+    __try { a = *(const unsigned*)((uint8_t*)e + 8); b = *(const unsigned*)((uint8_t*)e + 0xC); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    ArenaEventSeen(a, b);
     if (g_topDogsBack && TopDogCampHeldNear()) {
-        unsigned a = 0, b = 0;
-        __try { a = *(const unsigned*)((uint8_t*)e + 8); b = *(const unsigned*)((uint8_t*)e + 0xC); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         for (unsigned h : g_topDogCompletion)
             if (a == h || b == h) {
                 if (InterlockedIncrement(&g_topDogBlocked) <= 50) LogLine("CAMPREPOP Top Dog completion event %08X dropped (camp repopulated)", h);
@@ -1409,7 +1497,7 @@ static void CampDiagTick(float step) {
         anyNear = true;
         int el, cl, en = LocEnabled(c.enemyId, &el), cv = LocEnabled(c.civilianId, &cl);
         LogLine("CAMPDIAG %s: %s, %.0f m, player %.0f %.0f %.0f, enemy on %d loaded %d, civilians on %d loaded %d, tracked %d, spawned mask %08X",
-                c.name, RP_NAMES[r.state], d, g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z, en, el, cv, cl, r.revivedCount, r.spawnedMask);
+                c.name, RP_NAMES[r.state], d, g_PlayerPos.x, g_PlayerPos.y, g_PlayerPos.z, en, el, cv, cl, r.revivedCount, (unsigned)r.spawnedMask);
         if (const uint8_t* h = *(const uint8_t* const*)A_SpawnHandlerPtr) LogLine("CAMPDIAG spawn budget: in use %d, limit %d, default %d", h[0x1667], h[0x1669], h[0x166B]);
         CampDiagGroup(c.name, "civilian", c.civilianId);
         CampDiagGroup(c.name, "base", g_campBase[i]);
@@ -1785,6 +1873,7 @@ static void RepopTick(float dt) {
     LootTick(step);
     SniperTick(step);
     MinefieldTick(step);
+    ArenaTick(step);
 #if MM_CAMP_DIAG
     CampDiagTick(step);
 #endif
@@ -1826,8 +1915,8 @@ static void RepopTick(float dt) {
         case RP_ACTIVE: {
             // switched off by the game (save loaded, or a camp script) -> the civilians must come back (user test 2026-10-14:
             // sd1300 stayed empty after the reset left them blocked)
-            uint8_t* sp[32]; unsigned ids[32];
-            int n = LocSpawnPoints(c.enemyId, sp, ids, 32);
+            uint8_t* sp[REPOP_TRACK]; unsigned ids[REPOP_TRACK];
+            int n = LocSpawnPoints(c.enemyId, sp, ids, REPOP_TRACK);
             if (en == 0) {
 #if MM_CAMP_DIAG
                 int on = 0, entity = 0;                          // 2026-11-06: the game's own camp completion ran with points still on (sd1290: 12 of 21 dead)
@@ -1869,11 +1958,11 @@ static void RepopTick(float dt) {
                         if (!wasOff || chars) RepopTrackLookout(r, ids[k]);
                         continue;
                     }
-                    if (IsTopDog(ids[k]) || (TopDogPoint(ids[k]) && strstr(c.name, "_wc"))) {   // warchiefs: their death opens the arena (see EventSend_hook)
+                    if (IsTopDog(ids[k])) {                       // r47: warchiefs come back too, the mod opens their arena gate (g_warchiefGates)
                         LogLine("CAMPREPOP %s: Top Dog spawn point %08X left off", c.name, ids[k]);
                         continue;
                     }
-                    if (character && r.revivedCount < 32) {
+                    if (character && r.revivedCount < REPOP_TRACK) {
                         if (TopDogPoint(ids[k])) {
                             r.topDog = ids[k];
                             LogLine("CAMPREPOP %s: Top Dog spawn point %08X back, one more enemy to beat; its completion events are dropped while the camp is held", c.name, ids[k]);
@@ -1918,7 +2007,7 @@ static void RepopTick(float dt) {
 #endif
                             if ((r.ignoredMask >> j & 1) || chars) { r.noLive[j] = 0.f; continue; }
                             if (dead && dd <= REPOP_LOST_RANGE) {
-                                sp[k][0x232] = 0; r.ignoredMask |= 1u << j; RepopRememberDead(r, ids[k]);
+                                sp[k][0x232] = 0; r.ignoredMask |= 1ull << j; RepopRememberDead(r, ids[k]);
                                 LogLine("CAMPREPOP %s: lookout %08X dead", c.name, ids[k]);
                                 continue;
                             }
@@ -1930,7 +2019,7 @@ static void RepopTick(float dt) {
                                     SafeRevive(sp[k]);
                                     LogLine("CAMPREPOP %s: lookout %08X has no enemy, asked again (%d of %d, %.0f m from the player)", c.name, ids[k], r.lost[j], REPOP_MAX_LOST, dd);
                                 } else {
-                                    r.ignoredMask |= 1u << j;
+                                    r.ignoredMask |= 1ull << j;
                                     LogLine("CAMPREPOP %s: lookout %08X not counted any more (point on %d, gave no enemy, %.0f m from the player)", c.name, ids[k], sp[k][0x232], dd);
                                 }
                             }
@@ -1967,7 +2056,7 @@ static void RepopTick(float dt) {
                                 if (v.go && v.vt == VT_CHARACTER_GO) AiProbe(c.name, ids[k], v.go, r.liveTime[j] + step);
                             }
 #endif
-                            r.spawnedMask |= 1u << j; r.liveMask |= 1u << j; r.ignoredMask &= ~(1u << j); r.noLive[j] = 0.f; r.liveTime[j] += step; live++; continue;
+                            r.spawnedMask |= 1ull << j; r.liveMask |= 1ull << j; r.ignoredMask &= ~(1ull << j); r.noLive[j] = 0.f; r.liveTime[j] += step; live++; continue;
                         }
                         if (!(r.spawnedMask >> j & 1) || (r.ignoredMask >> j & 1)) continue;
                         r.noLive[j] += step;
@@ -1975,14 +2064,14 @@ static void RepopTick(float dt) {
                         if (r.noLive[j] < REPOP_NO_SPAWN) continue;
                         if (r.liveMask >> j & 1) {                // despawned alive: the game only brings it back within 50 m of the point
                             if (r.liveTime[j] < REPOP_NO_SPAWN && dd <= REPOP_LOST_RANGE && ++r.lost[j] >= REPOP_MAX_LOST) {
-                                sp[k][0x232] = 0; r.ignoredMask |= 1u << j;   // off, or the game spawns it again by itself; remembered as dead until the next repopulation
+                                sp[k][0x232] = 0; r.ignoredMask |= 1ull << j;   // off, or the game spawns it again by itself; remembered as dead until the next repopulation
                                 LogLine("CAMPREPOP %s: spawn point %08X lost its enemy %d times right after spawning, switched off", c.name, ids[k], r.lost[j]);
                                 continue;
                             }
-                            r.spawnedMask &= ~(1u << j); r.liveMask &= ~(1u << j); r.noLive[j] = 0.f; r.liveTime[j] = 0.f;
+                            r.spawnedMask &= ~(1ull << j); r.liveMask &= ~(1ull << j); r.noLive[j] = 0.f; r.liveTime[j] = 0.f;
                             LogLine("CAMPREPOP %s: spawn point %08X lost its enemy, asked again", c.name, ids[k]);
                         } else {
-                            r.ignoredMask |= 1u << j;
+                            r.ignoredMask |= 1ull << j;
                             LogLine("CAMPREPOP %s: spawn point %08X gave no enemy in %.0f s, ignored", c.name, ids[k], REPOP_NO_SPAWN);
                         }
                     }
@@ -1997,7 +2086,7 @@ static void RepopTick(float dt) {
                             if (dd <= (have ? REPOP_POINT : REPOP_SPAWN) && dd < bestD) { bestD = dd; best = k; bestJ = j; }
                         }
                     if (best < 0 || live >= REPOP_MAX_LIVE) break;
-                    r.spawnedMask |= 1u << bestJ;                 // also when SafeSpawn fails: no retry every tick
+                    r.spawnedMask |= 1ull << bestJ;                 // also when SafeSpawn fails: no retry every tick
                     r.noLive[bestJ] = 0.f;
                     if (SafeSpawn(sp[best])) { live++; now++; }
                 }
@@ -2085,7 +2174,7 @@ static void RepopTick(float dt) {
                         float dd = SpawnPointDistance(sp[k], c, d);
                         if (dd > REPOP_POINT) { r.noLive[j] = 0.f; continue; }
                         if ((r.noLive[j] += step) < REPOP_TRIGGER_WAIT) continue;
-                        r.spawnedMask |= 1u << j; r.noLive[j] = 0.f;   // from here on like any spawned point (no entity in REPOP_NO_SPAWN: ignored)
+                        r.spawnedMask |= 1ull << j; r.noLive[j] = 0.f;   // from here on like any spawned point (no entity in REPOP_NO_SPAWN: ignored)
                         bool ok = SafeSpawn(sp[k]);
                         LogLine("CAMPREPOP %s: spawn point %08X: its trigger never fired and it is the last one, spawned by the mod (%s, %.0f m from the player)", c.name, ids[k], ok ? "ok" : "failed", dd);
                     }
@@ -2272,6 +2361,10 @@ DEFHOOK(void, LocLoadStatus, (const void* save)) {
             }
         }
         LogLine("CAMPREPOP save loaded: %d held camp(s) held again, %d left to the game", again, game);
+        if (g_arenaWait.camp >= 0) {   // r48: the loaded save may be from before the Top Dog's death
+            LogLine("CAMPREPOP %s: save loaded, arena flames fallback cancelled", g_camps[g_arenaWait.camp].name);
+            g_arenaWait.camp = -1;
+        }
     }
     InterlockedExchange(&g_repopSaving, 0);
 }

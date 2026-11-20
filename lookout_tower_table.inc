@@ -20,6 +20,8 @@ static const struct { int camp; unsigned parts[16]; } g_lookoutTowers[] = {
     { 23, { 0xE5FEAFAD, 0xA57D580D, 0x43DAFBFB, 0x88494308 } },   // a02_sd2060_gameplay (a02_sd2060.blo.xml), lookouts 4770B0F4 8F7310D0
     { 24, { 0xC8FF194F, 0xC3AEA89E, 0xFFA12F6C, 0x6C2FED73, 0x8E219B0B, 0xA1F976B9, 0xD0512FBB, 0xE837AC14, 0xC64099CF, 0x93FEEFB2, 0xD166E258, 0x81364123, 0xF672B7ED, 0x268D6B39, 0x1276AAA5, 0x4D21BF05 } },   // a01_vv1050_gameplay (a01_vv1050_camp.blo.xml), lookouts 5222CD57 D7B8EED9
     { 26, { 0x9F8878BB, 0x2875EFD5, 0x9522E4BA, 0x33FA3041, 0x04D7DA62, 0x6C8E0352, 0x1EA3D948, 0x924E2EBB } },   // a02_fo2020_gameplay (a02_fo2020.blo.xml), lookouts A6E7914F
+    { 33, { 0x158CB4A1, 0x2A68CB1C } },   // a01_wc1020_spawn (a01_wc1020_camp.blo.xml), lookouts E8019386
+    { 34, { 0x976B82C7, 0x6CCBE020, 0x2246BBB7, 0x3142CF7C, 0xDD2067A4, 0x39CD6175, 0xF10175DF, 0x6760C5DA, 0x4D97E934, 0x6D3D453A, 0x1C530BE8, 0x25DC04DB, 0x31F5BAF7, 0x879D3DA3, 0x70410788, 0x2DF92357 } },   // a02_wc2020_gameplay (a02_wc2020.blo.xml), lookouts 9883A02D 7A05D077
 };
 // { camp index, lookout spawn point, the tower platform it stands on }: a lookout whose platform is down spawns on the ground
 // (camp_repop.inc LookoutsToGround, r37)
@@ -48,4 +50,7 @@ static const struct { int camp; unsigned lookout, platform; } g_lookoutPlatforms
     { 24, 0x5222CD57, 0x6C2FED73 },   // a01_vv1050_gameplay, platform 1.3 m from the point
     { 24, 0xD7B8EED9, 0xC64099CF },   // a01_vv1050_gameplay, platform 1.5 m from the point
     { 26, 0xA6E7914F, 0x924E2EBB },   // a02_fo2020_gameplay, platform 1.3 m from the point
+    { 33, 0xE8019386, 0x158CB4A1 },   // a01_wc1020_spawn, platform 0.6 m from the point
+    { 34, 0x7A05D077, 0x6760C5DA },   // a02_wc2020_gameplay, platform 1.4 m from the point
+    { 34, 0x9883A02D, 0xDD2067A4 },   // a02_wc2020_gameplay, platform 1.4 m from the point
 };

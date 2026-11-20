@@ -33,4 +33,8 @@ static const struct { int camp; unsigned graph; } g_campCompletion[] = {
     { 28, 0xE5DC55E0 },   // a01_vv1110_gameplay (a01_vv1110.blo.xml), starts CE62E1E8 3343D208 781C5494
     { 29, 0x10A772B6 },   // a01_vv1060_gameplay (a01_vv1060.blo.xml), starts CE62E1E8 9F75A3A0 94EE1F96
     { 30, 0x508439A4 },   // a01_vv1080_gameplay (a01_vv1080.blo.xml), starts CE62E1E8 24AC060C 4133F372
+    { 31, 0x1947F60A },   // a01_wc1050_gameplay (a01_wc1050.blo.xml), starts CE62E1E8 E682B09B 449E69A8
+    { 32, 0x2A4C9CAC },   // a02_wc2040_spawn (a02_wc2040.blo.xml), starts CE62E1E8 A166364F 6C68F429
+    { 33, 0x0F6E977A },   // a01_wc1020_spawn (a01_wc1020_camp.blo.xml), starts CE62E1E8 6A384B13 97842432
+    { 34, 0x847418AF },   // a02_wc2020_gameplay (a02_wc2020.blo.xml), starts CE62E1E8 4FB7BA0F 78849164
 };

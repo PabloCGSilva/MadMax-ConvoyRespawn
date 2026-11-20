@@ -51,7 +51,7 @@
 // User-requested (2026-09-18): always show a visible tag for whatever
 // build is currently installed, so it's never ambiguous which test is
 // running. Bump this string every time a new test build goes out.
-#define MM_BUILD_TAG "v0.9.3-beta1 (2026-11-19b)" MM_AUTOTEST_TAG
+#define MM_BUILD_TAG "v0.9.4-beta1 (2026-11-20)" MM_AUTOTEST_TAG
 
 // ---- Session event log (2026-09-21) ----
 // Replaces screenshot-driven debugging: every notable event (wreck seen,
@@ -1928,13 +1928,14 @@ static const CampEntry g_camps[] = {
     { 0xB7A6D39A, 0x22AC50F1, -9285.f, 4827.f, "a01_vv1110_gameplay" },
     { 0xE630E231, 0x7EDE3DDB, -6857.f, 3541.f, "a01_vv1060_gameplay" },
     { 0xE762AD41, 0xD3DE5E6A, -6237.f, 4771.f, "a01_vv1080_gameplay" },
-#if MM_DEV_TOOLS
-    // warchief camps (Top Dog strongholds, 2026-10-16 test): same layout, enemy part without collectibles (repopulate_table.py)
+    // warchief camps (Top Dog strongholds, 2026-10-16 test): same layout, enemy part without collectibles (repopulate_table.py).
+    // r47 (user 2026-11-19: "pode fazer o r47"): in the release too, the warchief back (camp_repop.inc g_warchiefGates). The Drop's
+    // centre is the middle of its character spawn points like the r43 camps (the location's origin, -9987 -1834, is 136 m east of them;
+    // the other three are within 25 m: tools/aibt/camp_points.py)
     { 0x0E77AB96, 0xF23C43C9, -8026.f, 4138.f, "a01_wc1050_gameplay" },
     { 0x27ECF4B1, 0xCBCAFC3A, -5384.f, -513.f, "a02_wc2040_spawn" },
     { 0xC72615C6, 0x2E5ADAAF, -4498.f, 5468.f, "a01_wc1020_spawn" },
-    { 0xE1C95370, 0x2E7E4843, -9987.f, -1834.f, "a02_wc2020_gameplay" },
-#endif
+    { 0xE1C95370, 0x2E7E4843, -10123.f, -1831.f, "a02_wc2020_gameplay" },
 };
 static const uintptr_t A_LocContext = 0x14179F0D8;
 

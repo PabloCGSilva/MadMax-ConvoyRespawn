@@ -14,9 +14,12 @@ static const unsigned g_baseCharPoints[] = {
     0xA89A5F0A,   // a01_vv1110 spp.scav_spawn_point
     0xB2AC150D,   // a02_sd2010 spp.scav_spawn_point
     0xBC2662B1,   // a02_sd2090 spp.scav_spawn_point
+    0xCCC54CF1,   // a02_wc2040 spp.scav_spawn_point
     0xD5E19E34,   // a01_sd1270 spp.scav_spawn_point
+    0xF23FD1AB,   // a02_wc2020 spp.scav_spawn_point
 };
 static const unsigned g_baseLootPoints[] = {
+    0x07CEE688,   // a01_wc1050
     0x089FD1B6,   // a01_sd1330
     0x10668896,   // a01_sd1010
     0x1FB95D11,   // a01_sd1130
@@ -27,6 +30,7 @@ static const unsigned g_baseLootPoints[] = {
     0x34F84CBE,   // a01_sd1190
     0x3D0DAFA3,   // a01_sd1030
     0x484460BF,   // a01_fd1050
+    0x5633C3A1,   // a02_wc2040
     0x583D7B75,   // a01_sd1240
     0x59FCF3A2,   // a01_fd1110
     0x800F37F8,   // a01_vv1050
@@ -53,15 +57,18 @@ static const unsigned g_baseLootPoints[] = {
 };
 static const unsigned g_nonCharPoints[] = {
     0x0509754F,   // a02_fo2020_gameplay
+    0x15A0687D,   // a01_wc1050_gameplay
     0x1BE89D67,   // a02_loot_pinkeye02_02_logic
     0x1CECF8AD,   // a02_fo2020_gameplay
     0x1F375FB2,   // a01_loot_gutgash02_04_logic
     0x28BD27C3,   // a01_loot_jeet04_03_logic
     0x302BA231,   // a02_fo2020_gameplay
+    0x3137BCA5,   // a01_wc1050_gameplay
     0x37A9AEAE,   // a01_loot_jeet04_03_logic
     0x452AB6CE,   // a01_sd1240_gameplay
     0x4EBB7A8C,   // a01_loot_jeet00_07_logic
     0x4FB1C8D4,   // a01_sd1210_spawn
+    0x510527E0,   // a01_wc1050_gameplay
     0x5AB478DD,   // a02_fo2020_gameplay
     0x606878E2,   // a01_sd1210_spawn
     0x69C991A6,   // a02_loot_pinkeye04_13_logic
