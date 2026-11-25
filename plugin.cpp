@@ -51,7 +51,7 @@
 // User-requested (2026-09-18): always show a visible tag for whatever
 // build is currently installed, so it's never ambiguous which test is
 // running. Bump this string every time a new test build goes out.
-#define MM_BUILD_TAG "v0.9.4-beta1-steamtest5 (2026-11-24)" MM_AUTOTEST_TAG
+#define MM_BUILD_TAG "v0.9.4-beta1-steamtest6 (2026-11-24)" MM_AUTOTEST_TAG
 
 // ---- Session event log (2026-09-21) ----
 // Replaces screenshot-driven debugging: every notable event (wreck seen,
@@ -1942,9 +1942,10 @@ static const unsigned CONVOY_ACTIVE_ENABLED_START = 0x903D2DBAu;
 static const unsigned MISSION_DIM_RIM = 0x946AF1C1u;   // Jenkins("mm1038"), what the dialogue scripts pass to logbook.IsMissionCompleted
 static const float CONVOY_DIM_RIM_RESEND_S = 60.0f;
 
+static uintptr_t A_LogBookInstance = 0x141719778;
+static uintptr_t A_LogBookIsMissionCompleted = 0x1403024B0;
+
 static bool LogBookMissionDone(unsigned mission) {
-    static const uintptr_t A_LogBookInstance = 0x141719778;
-    static const uintptr_t A_LogBookIsMissionCompleted = 0x1403024B0;
     static const uint8_t head[7] = { 0x48, 0x8B, 0x81, 0xB8, 0x04, 0x00, 0x00 };
     __try {
         if (memcmp((const void*)A_LogBookIsMissionCompleted, head, sizeof head)) return false;
@@ -2220,7 +2221,7 @@ static const CampEntry g_camps[] = {
     { 0xC72615C6, 0x2E5ADAAF, -4498.f, 5468.f, "a01_wc1020_spawn" },
     { 0xE1C95370, 0x2E7E4843, -10123.f, -1831.f, "a02_wc2020_gameplay" },
 };
-static const uintptr_t A_LocContext = 0x14179F0D8;
+static uintptr_t A_LocContext = 0x14179F0D8;
 
 static int FindLocations(unsigned id, uint8_t** out, int max) {
     int n = 0;
@@ -2436,9 +2437,120 @@ static void AutotestTick(CCharacter* ch, float dt) {
 static ConvoyModOverlay g_convoyModOverlay;
 #endif
 #if MM_DEV_TOOLS || MM_WORLD_REPOP
-static bool g_worldRepopOn = false;     // set in PluginHooks: only on the GOG build whose addresses camp_repop.inc uses
+static bool g_worldRepopOn = false;     // set in PluginHooks: on the GOG build whose addresses camp_repop.inc uses, or where ResolveRepopSteam found them all
 #include "camp_repop.inc"
 #include "threat_diag.inc"
+#endif
+#if MM_DEV_TOOLS || MM_WORLD_REPOP
+// World Repop on Steam (2026-11-24). Its game addresses are fixed GOG ones; on the Steam build (see
+// g_steamPatterns) each one is found by signature (analysis/steam/repop_sigs.py): the GOG form first,
+// then the Steam form. RS_FUNC: the address is the match + off. RS_REF: a rip-relative disp32 (or a
+// call's rel32) sits at match + off, and its instruction ends `extra` bytes after it. Every address
+// must be found exactly once, or none is changed and World Repop stays off.
+// GameGuiSetConvoyRouteWrecked has no signature (a leaf function like its neighbours, only called
+// through a pointer): on Steam a respawned convoy's map route keeps its wrecked mark.
+enum { RS_FUNC, RS_REF };
+struct RepopSig {
+    const char* name; void* var; int kind; uintptr_t gog;
+    const char* gogPattern; int gogOff; const char* steamPattern; int steamOff; int extra;
+};
+static uintptr_t A_LocSaveStatus = 0x1406393B0;   // SLocationInfo save status (hooked: saves keep repopulated camps liberated)
+static const RepopSig g_repopSigs[] = {
+    { "NEvent::CSendEvent::SendMsg", &A_SendEventMsg, RS_FUNC, 0x140007CA0, "48 81 EC 68 02 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 50 02 00 00 48 8D 54 24 50", 0, "48 81 EC 68 02 00 00 48 8B 05 ?? ?? ?? ?? 48 31 E0 48 89 84 24 50 02 00 00 48 8D 54 24 50", 0, 0 },   // sub rsp, 0x268; mov rax, qword ptr [rip + 0x17030ca]; xor rax, rsp; mov qword ptr [rsp + 0x250], rax; lea rdx, [rsp + 0x50]
+    { "NAIConstantsProfilesHelpers::ComputeRegionThreatRatioForPosition", &A_TdRatio, RS_FUNC, 0x14002D480, "48 83 EC 28 48 8D 54 24 40 E8 ?? ?? ?? ?? 84 ?? 74 ?? 8B 4C 24 40", 0, nullptr, 0, 0 },   // sub rsp, 0x28; lea rdx, [rsp + 0x40]; call 0x1404ca060; test al, al; je 0x14002d4b1; mov ecx, dword ptr [rsp + 0x40]
+    { "AiGameObjectToEntityHandle", &AiGameObjectToEntityHandle, RS_FUNC, 0x140038E30, "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 89 74 24 48 48 8B F2 48 8B F9 ?? 85 ??", 0, "57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 89 74 24 48 48 89 D6 48 89 CF ?? 85 ??", 0, 0 },   // push rdi; sub rsp, 0x30; mov qword ptr [rsp + 0x20], 0xfffffffffffffffe; mov qword ptr [rsp + 0x40], rbx; mov qword ptr [rsp + 0x48], rsi; mov rsi, rdx; mov rdi
+    { "CCharacter::SetTransform", &CharSetTransform, RS_FUNC, 0x1400CD5F0, "40 53 48 83 EC 20 48 8B D9 48 81 C1 B8 01 00 00 E8 ?? ?? ?? ??", 0, "53 48 83 EC 20 48 89 CB 48 81 C1 B8 01 00 00 E8 ?? ?? ?? ??", 0, 0 },   // push rbx; sub rsp, 0x20; mov rbx, rcx; add rcx, 0x1b8; call 0x1406229a0
+    { "CCharacter body time imm32 (mov [rbx+4FC], 6.0f)", &A_CharacterBodyTime, RS_FUNC, 0x140149ECF, "48 C7 83 FC 04 00 00 00 00 C0 40 4C 89 A3 08 05 00 00 4C 89 A3 10 05 00 00", 7, nullptr, 7, 0 },   // mov qword ptr [rbx + 0x4fc], 0x40c00000; mov qword ptr [rbx + 0x508], r12; mov qword ptr [rbx + 0x510], r12
+    { "CLocator::GetLocalizedString", &A_LocatorGetString, RS_FUNC, 0x1402117A0, "48 83 EC 28 E8 ?? ?? ?? ?? ?? 85 ?? 75 ?? 48 8D 05 ?? ?? ?? ?? 48 83 C4 28", 0, nullptr, 0, 0 },   // sub rsp, 0x28; call 0x1409c1090; test rax, rax; jne 0x1402117b5; lea rax, [rip + 0xf8a003]; add rsp, 0x28
+    { "LocMainDone call return in ShowIcon", &A_LocMainDoneShowIconRet, RS_FUNC, 0x14022E25E, "E8 ?? ?? ?? ?? 84 ?? 74 ?? 48 8D 05 ?? ?? ?? ?? 49 8B CD C6 84 28 EC 53 71 01 3C", 5, "E8 ?? ?? ?? ?? 84 ?? 74 ?? 48 8D 05 ?? ?? ?? ?? 4C 89 E9 C6 84 28 EC 53 71 01 3C", 5, 0 },   // call 0x1403df0d0; test al, al; je 0x14022e28f; lea rax, [rip - 0x22e269]; mov rcx, r13; mov byte ptr [rax + rbp + 0x17153ec], 0x3c
+    { "GameGuiMessageQueuePush", &A_GuiMessagePush, RS_FUNC, 0x14026ABE0, "48 89 74 24 10 57 48 83 EC 20 48 8B 05 ?? ?? ?? ?? 0F B6 F2", 0, nullptr, 0, 0 },   // mov qword ptr [rsp + 0x10], rsi; push rdi; sub rsp, 0x20; mov rax, qword ptr [rip + 0x14a9b17]; movzx esi, dl
+    { "CGraphScriptGameObject::HandleEvent", &A_GraphScriptHandleEvent, RS_FUNC, 0x1402B2DA0, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B 99 B8 00 00 00", 0, nullptr, 0, 0 },   // mov qword ptr [rsp + 8], rbx; mov qword ptr [rsp + 0x10], rbp; mov qword ptr [rsp + 0x18], rsi; push rdi; sub rsp, 0x20; mov rbx, qword ptr [rcx + 0xb8]
+    { "NGSONodes::GetRegionThreat", &A_TdGso, RS_FUNC, 0x1402D52D0, "40 55 57 48 83 EC 58 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 40", 0, "55 57 48 83 EC 58 48 8B 05 ?? ?? ?? ?? 48 31 E0 48 89 44 24 40", 0, 0 },   // push rbp; push rdi; sub rsp, 0x58; mov rax, qword ptr [rip + 0x1435a9a]; xor rax, rsp; mov qword ptr [rsp + 0x40], rax
+    { "CLogBook::IsMissionCompleted", &A_LogBookIsMissionCompleted, RS_FUNC, 0x1403024B0, "48 8B 81 B8 04 00 00 4C 8B 89 C0 04 00 00 49 3B C1 74 ?? 44 8B 02", 0, "48 8B 81 B8 04 00 00 4C 8B 89 C0 04 00 00 4C 39 C8 74 ?? 44 8B 02", 0, 0 },   // mov rax, qword ptr [rcx + 0x4b8]; mov r9, qword ptr [rcx + 0x4c0]; cmp rax, r9; je 0x1403024d6; mov r8d, dword ptr [rdx]
+    { "CLootBag::Load", &A_LootBagLoad, RS_FUNC, 0x140310E70, "48 89 5C 24 08 57 48 83 EC 20 48 8B DA 48 8B F9 E8 ?? ?? ?? ?? 48 8B D0 48 8B CB E8 ?? ?? ?? ?? ?? 85 ?? 74 ?? 8B 00", 0, "48 89 5C 24 08 57 48 83 EC 20 48 89 D3 48 89 CF E8 ?? ?? ?? ?? 48 89 C2 48 89 D9 E8 ?? ?? ?? ?? ?? 85 ?? 74 ?? 8B 00", 0, 0 },   // mov qword ptr [rsp + 8], rbx; push rdi; sub rsp, 0x20; mov rbx, rdx; mov rdi, rcx; call 0x140681740; mov rdx, rax; mov rcx, rbx; call 0x14074bcd0; test rax, rax
+    { "CSpawnPoint::Enable", &A_SpawnPointEnable, RS_FUNC, 0x1403128D0, "84 ?? 74 ?? 80 B9 22 02 00 00 00 75 ?? 80 A1 23 02 00 00 FE", 0, nullptr, 0, 0 },   // test dl, dl; je 0x1403128fb; cmp byte ptr [rcx + 0x222], 0; jne 0x140312912; and byte ptr [rcx + 0x223], 0xfe
+    { "CTargetGameObject::Save", &A_TargetSave, RS_FUNC, 0x140317470, "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B DA 48 8B F9 E8 ?? ?? ?? ?? BE 01 00 00 00 48 8B CB 48 8B D0 44 8B C6 E8 ?? ?? ?? ?? 48 8B 5C 24 30", 0, "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 89 D3 48 89 CF E8 ?? ?? ?? ?? BE 01 00 00 00 48 89 D9 48 89 C2 41 89 F0 E8 ?? ?? ?? ?? 48 8B 5C 24 30", 0, 0 },   // mov qword ptr [rsp + 8], rbx; mov qword ptr [rsp + 0x10], rsi; push rdi; sub rsp, 0x20; mov rbx, rdx; mov rdi, rcx; call 0x140681740; mov esi, 1; mov rcx, rbx; 
+    { "CTargetGameObject::EnableTarget", &A_TargetEnable, RS_FUNC, 0x140317670, "40 53 48 83 EC 20 80 B9 A2 01 00 00 00 48 8B D9 75 ?? 48 8B 01", 0, "53 48 83 EC 20 80 B9 A2 01 00 00 00 48 89 CB 75 ?? 48 8B 01", 0, 0 },   // push rbx; sub rsp, 0x20; cmp byte ptr [rcx + 0x1a2], 0; mov rbx, rcx; jne 0x140317692; mov rax, qword ptr [rcx]
+    { "CSpawnPoint::Spawn", &A_SpawnPointSpawn, RS_FUNC, 0x14032C1A0, "48 89 74 24 18 57 48 81 EC A0 00 00 00 48 8B F9 48 8D 54 24 20", 0, "48 89 74 24 18 57 48 81 EC A0 00 00 00 48 89 CF 48 8D 54 24 20", 0, 0 },   // mov qword ptr [rsp + 0x18], rsi; push rdi; sub rsp, 0xa0; mov rdi, rcx; lea rdx, [rsp + 0x20]
+    { "LocationInfoIsCampMainMissionCompleted", &A_LocMainDone, RS_REF, 0x1403DF0D0, "E8 ?? ?? ?? ?? 84 ?? 74 ?? C6 83 DA 01 00 00 00 48 8B 7C 24 30", 1, nullptr, 1, 0 },   // call 0x1403df0d0; test al, al; je 0x14047da9b; mov byte ptr [rbx + 0x1da], 0; mov rdi, qword ptr [rsp + 0x30]
+    { "LocationInfoGetTrackedItemInfo", &A_LocTrackedItems, RS_FUNC, 0x1403E0A30, "0F B7 C1 4C 8D 0C 40 48 8B 05 ?? ?? ?? ?? 48 8B 08 49 C1 E1 05", 0, nullptr, 0, 0 },   // movzx eax, cx; lea r9, [rax + rax*2]; mov rax, qword ptr [rip + 0x133a5c2]; mov rcx, qword ptr [rax]; shl r9, 5
+    { "CEventRouter::Load", &A_RouterLoad, RS_FUNC, 0x1403E18F0, "48 89 5C 24 08 57 48 83 EC 20 48 8B FA 48 8B D9 E8 ?? ?? ?? ?? 4C 8D 83 E8 00 00 00", 0, "48 89 5C 24 08 57 48 83 EC 20 48 89 D7 48 89 CB E8 ?? ?? ?? ?? 4C 8D 83 E8 00 00 00", 0, 0 },   // mov qword ptr [rsp + 8], rbx; push rdi; sub rsp, 0x20; mov rdi, rdx; mov rbx, rcx; call 0x140681740; lea r8, [rbx + 0xe8]
+    { "CDestructibleObject disable parts", &A_DestructibleDisableParts, RS_FUNC, 0x140447670, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 F6 81 40 02 00 00 01", 0, nullptr, 0, 0 },   // mov qword ptr [rsp + 8], rbx; mov qword ptr [rsp + 0x10], rbp; mov qword ptr [rsp + 0x18], rsi; push rdi; sub rsp, 0x20; test byte ptr [rcx + 0x240], 1
+    { "CDestructibleObject enable parts", &A_DestructibleEnableParts, RS_FUNC, 0x140484B00, "4C 8B DC 55 53 49 8D 6B C8 48 81 EC 28 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 F0 48 8B D9", 0, "49 89 E3 55 53 49 8D 6B C8 48 81 EC 28 01 00 00 48 8B 05 ?? ?? ?? ?? 48 31 E0 48 89 45 F0 48 89 CB", 0, 0 },   // mov r11, rsp; push rbp; push rbx; lea rbp, [r11 - 0x38]; sub rsp, 0x128; mov rax, qword ptr [rip + 0x1286261]; xor rax, rsp; mov qword ptr [rbp - 0x10], rax; mo
+    { "CDestructibleObject::Load", &A_DestructibleLoad, RS_FUNC, 0x140485100, "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B DA 48 8B F9 E8 ?? ?? ?? ?? 48 8B D0", 0, "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 89 D3 48 89 CF E8 ?? ?? ?? ?? 48 89 C2", 0, 0 },   // mov qword ptr [rsp + 8], rbx; mov qword ptr [rsp + 0x10], rsi; push rdi; sub rsp, 0x20; mov rbx, rdx; mov rdi, rcx; call 0x140681740; mov rdx, rax
+    { "RegionInfoGetThreatSummaryInRegion", &A_TdSummary, RS_FUNC, 0x140491800, "41 54 48 83 EC 30 4C 8B E2 48 C7 02 00 00 00 00 48 8B 15 ?? ?? ?? ??", 0, "41 54 48 83 EC 30 49 89 D4 48 C7 02 00 00 00 00 48 8B 15 ?? ?? ?? ??", 0, 0 },   // push r12; sub rsp, 0x30; mov r12, rdx; mov qword ptr [rdx], 0; mov rdx, qword ptr [rip + 0x1289ae9]
+    { "RegionInfoGetThreatLevelSummaryInRegion", &A_TdLevelSummary, RS_FUNC, 0x1404ADFF0, "40 53 48 83 EC 20 48 8B 05 ?? ?? ?? ?? 45 33 C0 48 8B DA 44 8B 88 78 0E 24 00", 0, "53 48 83 EC 20 48 8B 05 ?? ?? ?? ?? 45 31 C0 48 89 D3 44 8B 88 78 0E 24 00", 0, 0 },   // push rbx; sub rsp, 0x20; mov rax, qword ptr [rip + 0x1263c93]; xor r8d, r8d; mov rbx, rdx; mov r9d, dword ptr [rax + 0x240e78]
+    { "CGameModule::GetRegionThreat", &A_TdXvmRegion, RS_FUNC, 0x1404B92C0, "48 8B C4 55 48 8D 68 A1 48 81 EC 90 00 00 00 48 C7 45 E7 FE FF FF FF 48 89 58 08 48 89 70 10 48 89 78 18 4C 89 60 20", 0, "48 89 E0 55 48 8D 68 A1 48 81 EC 90 00 00 00 48 C7 45 E7 FE FF FF FF 48 89 58 08 48 89 70 10 48 89 78 18 4C 89 60 20", 0, 0 },   // mov rax, rsp; push rbp; lea rbp, [rax - 0x5f]; sub rsp, 0x90; mov qword ptr [rbp - 0x19], 0xfffffffffffffffe; mov qword ptr [rax + 8], rbx; mov qword ptr [rax +
+    { "CGameModule::GetTerritoryThreat", &A_TdXvmTerritory, RS_FUNC, 0x1404CBAC0, "4C 8B DC 57 48 81 EC 90 00 00 00 48 C7 44 24 20 FE FF FF FF 49 89 5B 08 4C 8B CA 48 8B D9", 0, "49 89 E3 57 48 81 EC 90 00 00 00 48 C7 44 24 20 FE FF FF FF 49 89 5B 08 49 89 D1 48 89 CB", 0, 0 },   // mov r11, rsp; push rdi; sub rsp, 0x90; mov qword ptr [rsp + 0x20], 0xfffffffffffffffe; mov qword ptr [r11 + 8], rbx; mov r9, rdx; mov rbx, rcx
+    { "SpawnSystemGetStatus", &A_SpawnSystemGetStatus, RS_REF, 0x140530420, "E8 ?? ?? ?? ?? 4C 8B 6C 24 20 4C 8B 64 24 58 48 8B 74 24 48", 1, nullptr, 1, 0 },   // call 0x140530420; mov r13, qword ptr [rsp + 0x20]; mov r12, qword ptr [rsp + 0x58]; mov rsi, qword ptr [rsp + 0x48]
+    { "CCountTrigger::Load", &A_CountTriggerLoad, RS_FUNC, 0x1405704F0, "48 89 5C 24 08 57 48 83 EC 20 48 8B DA 48 8B F9 E8 ?? ?? ?? ?? 48 8B D0 48 8B CB E8 ?? ?? ?? ?? ?? 85 ?? 74 ?? 83 38 00", 0, "48 89 5C 24 08 57 48 83 EC 20 48 89 D3 48 89 CF E8 ?? ?? ?? ?? 48 89 C2 48 89 D9 E8 ?? ?? ?? ?? ?? 85 ?? 74 ?? 83 38 00", 0, 0 },   // mov qword ptr [rsp + 8], rbx; push rdi; sub rsp, 0x20; mov rbx, rdx; mov rdi, rcx; call 0x140681740; mov rdx, rax; mov rcx, rbx; call 0x14074bcd0; test rax, rax
+    { "CAirVehicle::GetGroundHeight_Expensive", &A_GroundBelow, RS_FUNC, 0x14057FD40, "48 8B C4 55 48 8D A8 28 FF FF FF 48 81 EC D0 01 00 00 48 C7 45 88 FE FF FF FF 48 89 58 10 48 89 70 18", 0, "48 89 E0 55 48 8D A8 28 FF FF FF 48 81 EC D0 01 00 00 48 C7 45 88 FE FF FF FF 48 89 58 10 48 89 70 18", 0, 0 },   // mov rax, rsp; push rbp; lea rbp, [rax - 0xd8]; sub rsp, 0x1d0; mov qword ptr [rbp - 0x78], 0xfffffffffffffffe; mov qword ptr [rax + 0x10], rbx; mov qword ptr [r
+    { "GameLocationSystemInfoDisableLoading", &A_LocDisableLoading, RS_FUNC, 0x140638990, "F6 41 65 0E 74 ?? 80 61 66 0F 48 8B 41 28 80 49 66 20 ?? 85 ??", 0, nullptr, 0, 0 },   // test byte ptr [rcx + 0x65], 0xe; je 0x1406389d2; and byte ptr [rcx + 0x66], 0xf; mov rax, qword ptr [rcx + 0x28]; or byte ptr [rcx + 0x66], 0x20; test rax, rax
+    { "SLocationInfo save status", &A_LocSaveStatus, RS_FUNC, 0x1406393B0, "48 89 5C 24 08 48 89 6C 24 20 56 57 41 54 41 55 41 56 48 83 EC 20", 0, nullptr, 0, 0 },   // mov qword ptr [rsp + 8], rbx; mov qword ptr [rsp + 0x20], rbp; push rsi; push rdi; push r12; push r13; push r14; sub rsp, 0x20
+    { "SLocationInfo start load", &A_LocStartLoad, RS_FUNC, 0x1406676D0, "48 8B C4 57 48 83 EC 70 48 C7 44 24 30 FE FF FF FF 48 89 58 18", 0, "48 89 E0 57 48 83 EC 70 48 C7 44 24 30 FE FF FF FF 48 89 58 18", 0, 0 },   // mov rax, rsp; push rdi; sub rsp, 0x70; mov qword ptr [rsp + 0x30], 0xfffffffffffffffe; mov qword ptr [rax + 0x18], rbx
+    { "SLocationInfo load status", &A_LocLoadStatus, RS_FUNC, 0x140667E70, "40 53 56 48 83 EC 28 8B 15 ?? ?? ?? ?? 48 8B 1D ?? ?? ?? ?? 48 8B F1", 0, "53 56 48 83 EC 28 8B 15 ?? ?? ?? ?? 48 8B 1D ?? ?? ?? ?? 48 89 CE", 0, 0 },   // push rbx; push rsi; sub rsp, 0x28; mov edx, dword ptr [rip + 0x11372bb]; mov rbx, qword ptr [rip + 0x1137254]; mov rsi, rcx
+    { "GameLocationSystemInfoEnableLoading", &A_LocEnableLoading, RS_FUNC, 0x14066C5F0, "48 83 EC 28 48 8B 41 28 80 61 66 0F ?? 85 ?? 74 ?? 80 60 66 0F", 0, nullptr, 0, 0 },   // sub rsp, 0x28; mov rax, qword ptr [rcx + 0x28]; and byte ptr [rcx + 0x66], 0xf; test rax, rax; je 0x14066c605; and byte ptr [rax + 0x66], 0xf
+    { "CTerrainMapBase::GetBilinearHeight", &A_TerrainHeight, RS_FUNC, 0x14078BCF0, "48 83 EC 78 F3 0F 10 2A F3 0F 10 5A 08 0F 29 74 24 60 4C 8B C1", 0, "48 83 EC 78 F3 0F 10 2A F3 0F 10 5A 08 0F 29 74 24 60 49 89 C8", 0, 0 },   // sub rsp, 0x78; movss xmm5, dword ptr [rdx]; movss xmm3, dword ptr [rdx + 8]; movaps xmmword ptr [rsp + 0x60], xmm6; mov r8, rcx
+    { "CTextUtil::GetLocalizedText", &A_GuiLocalizedText, RS_FUNC, 0x1409192D0, "40 53 56 57 48 83 EC 50 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 40 48 8B DA", 0, "53 56 57 48 83 EC 50 48 8B 05 ?? ?? ?? ?? 48 31 E0 48 89 44 24 40 48 89 D3", 0, 0 },   // push rbx; push rsi; push rdi; sub rsp, 0x50; mov rax, qword ptr [rip + 0xdf1a99]; xor rax, rsp; mov qword ptr [rsp + 0x40], rax; mov rbx, rdx
+    { "CLocator::GetLocalizedStringRaw", &A_LocatorGetStringRaw, RS_FUNC, 0x1409C1090, "40 53 48 83 EC 30 4C 8B 41 28 8B DA 49 8B 40 08 80 78 49 00", 0, "53 48 83 EC 30 4C 8B 41 28 89 D3 49 8B 40 08 80 78 49 00", 0, 0 },   // push rbx; sub rsp, 0x30; mov r8, qword ptr [rcx + 0x28]; mov ebx, edx; mov rax, qword ptr [r8 + 8]; cmp byte ptr [rax + 0x49], 0
+    { "NEvent::CEventImpl::Send", &A_EventSend, RS_FUNC, 0x1409C25D0, "48 89 6C 24 18 57 48 83 EC 20 80 79 12 00 48 8B EA 48 8B F9", 0, "48 89 6C 24 18 57 48 83 EC 20 80 79 12 00 48 89 D5 48 89 CF", 0, 0 },   // mov qword ptr [rsp + 0x18], rbp; push rdi; sub rsp, 0x20; cmp byte ptr [rcx + 0x12], 0; mov rbp, rdx; mov rdi, rcx
+    { "CEventSystem::SendEvent", &A_EventSystemSendEvent, RS_FUNC, 0x1409C3150, "?? 85 ?? 0F 8E ?? ?? ?? ?? 48 89 5C 24 10 48 89 6C 24 18 56", 0, nullptr, 0, 0 },   // test r8d, r8d; jle 0x1409c321d; mov qword ptr [rsp + 0x10], rbx; mov qword ptr [rsp + 0x18], rbp; push rsi
+    { "NGraphScript::CGraph::GetInternalDataWritable", &A_GsGetDataWritable, RS_REF, 0x140F72140, "E8 ?? ?? ?? ?? C7 00 00 00 00 00 41 B8 AD DC BB 95 48 8B D6", 1, "E8 ?? ?? ?? ?? C7 00 00 00 00 00 41 B8 AD DC BB 95 48 89 F2", 1, 0 },   // call 0x140f72140; mov dword ptr [rax], 0; mov r8d, 0x95bbdcad; mov rdx, rsi
+    { "NGraphScript::CGraph::IsTypeMatch<float>", &A_GsIsTypeFloat, RS_REF, 0x140F72270, "E8 ?? ?? ?? ?? 48 8B CF 84 ?? 74 ?? 4D 8B 27 F3 0F 11 75 BB", 1, "E8 ?? ?? ?? ?? 48 89 F9 84 ?? 74 ?? 4D 8B 27 F3 0F 11 75 BB", 1, 0 },   // call 0x140f72270; mov rcx, rdi; test al, al; je 0x140250976; mov r12, qword ptr [r15]; movss dword ptr [rbp - 0x45], xmm6
+    { "NGraphScript::CGraph::ConvertSet<float>", &A_GsConvertSetFloat, RS_FUNC, 0x140F72A30, "48 83 EC 28 8B 42 04 4C 8B C9 3B 05 ?? ?? ?? ?? 75 ?? E8 ?? ?? ?? ??", 0, "48 83 EC 28 8B 42 04 49 89 C9 3B 05 ?? ?? ?? ?? 75 ?? E8 ?? ?? ?? ??", 0, 0 },   // sub rsp, 0x28; mov eax, dword ptr [rdx + 4]; mov r9, rcx; cmp eax, dword ptr [rip + 0x9adc44]; jne 0x140f72a4e; call 0x140281860
+    { "NGraphScript::CProcessor::GetGraph", &A_GsGetGraph, RS_REF, 0x140F761E0, "E8 ?? ?? ?? ?? 48 8B F0 41 B8 5C 9B DD 75 49 8B D6 49 8B CC", 1, "E8 ?? ?? ?? ?? 48 89 C6 41 B8 5C 9B DD 75 4C 89 F2 4C 89 E1", 1, 0 },   // call 0x140f761e0; mov rsi, rax; mov r8d, 0x75dd9b5c; mov rdx, r14; mov rcx, r12
+    { "NGraphScript::CProcessor::GetFirstVariableData", &A_GsGetFirstVariableData, RS_FUNC, 0x140F77060, "40 57 41 54 41 55 41 56 41 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 60 48 89 6C 24 68 48 89 74 24 70 45 8B F0", 0, "57 41 54 41 55 41 56 41 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 60 48 89 6C 24 68 48 89 74 24 70 45 89 C6", 0, 0 },   // push rdi; push r12; push r13; push r14; push r15; sub rsp, 0x30; mov qword ptr [rsp + 0x20], 0xfffffffffffffffe; mov qword ptr [rsp + 0x60], rbx; mov qword ptr 
+    { "CCharacter CGameObject vftable", &VT_CHARACTER_GO, RS_REF, 0x1411BDBD8, "48 8D 0D ?? ?? ?? ?? 48 89 4B 08 48 8D 05 ?? ?? ?? ?? 48 89 83 D8 00 00 00", 3, nullptr, 3, 0 },   // lea rcx, [rip + 0x1073e83]; mov qword ptr [rbx + 8], rcx; lea rax, [rip + 0x1073e58]; mov qword ptr [rbx + 0xd8], rax
+    { "CSpawnPoint CGameObject vftable", &VT_SPAWNPOINT_GO, RS_REF, 0x1411F06B8, "48 8D 05 ?? ?? ?? ?? 48 89 41 10 48 81 C1 98 01 00 00 E8 ?? ?? ?? ??", 3, nullptr, 3, 0 },   // lea rax, [rip + 0xea43ac]; mov qword ptr [rcx + 0x10], rax; add rcx, 0x198; call 0x1402e2320
+    { "CAvaSingle<CEventSystem>::Instance", &A_EventSystemInstance, RS_REF, 0x1417116D8, "48 8B 0D ?? ?? ?? ?? 41 8D 54 24 40 4C 89 6D D7 4C 89 65 DF", 3, nullptr, 3, 0 },   // mov rcx, qword ptr [rip + 0x15553e5]; lea edx, [r12 + 0x40]; mov qword ptr [rbp - 0x29], r13; mov qword ptr [rbp - 0x21], r12
+    { "CAvaSingle<CTerrainMapBase>::Instance", &A_TerrainInstance, RS_REF, 0x141711D10, "48 8B 0D ?? ?? ?? ?? 48 8D 54 24 30 0F 29 B4 24 B0 00 00 00", 3, nullptr, 3, 0 },   // mov rcx, qword ptr [rip + 0x12cbd06]; lea rdx, [rsp + 0x30]; movaps xmmword ptr [rsp + 0xb0], xmm6
+    { "CLocator instance", &A_Locator, RS_REF, 0x1417127E0, "48 39 1D ?? ?? ?? ?? 74 ?? 4C 8D 4C 24 30 49 8B D5 48 8B CD", 3, "48 39 1D ?? ?? ?? ?? 74 ?? 4C 8D 4C 24 30 4C 89 EA 48 89 E9", 3, 0 },   // cmp qword ptr [rip + 0xdbc316], rbx; je 0x140956508; lea r9, [rsp + 0x30]; mov rdx, r13; mov rcx, rbp
+    { "CLogBook instance", &A_LogBookInstance, RS_REF, 0x141719778, "48 8B 05 ?? ?? ?? ?? 8B 88 1C 06 00 00 41 89 8C 24 D8 1A 00 00", 3, nullptr, 3, 0 },   // mov rax, qword ptr [rip + 0x14a63dd]; mov ecx, dword ptr [rax + 0x61c]; mov dword ptr [r12 + 0x1ad8], ecx
+    { "SLocationInfoTable", &A_LocationInfoTable, RS_REF, 0x14171B000, "48 8B 05 ?? ?? ?? ?? 33 DB 4C 8B E2 4C 8B E9 8B FB 39 58 08", 3, "48 8B 05 ?? ?? ?? ?? 31 DB 49 89 D4 49 89 CD 89 DF 39 58 08", 3, 0 },   // mov rax, qword ptr [rip + 0x133a3e1]; xor ebx, ebx; mov r12, rdx; mov r13, rcx; mov edi, ebx; cmp dword ptr [rax + 8], ebx
+    { "s_SpawnSystemContext", &A_SpawnHandlerPtr, RS_REF, 0x14171B678, "48 8B 0D ?? ?? ?? ?? 45 33 C0 4C 8B 91 68 01 00 00 48 8B DA", 3, "48 8B 0D ?? ?? ?? ?? 45 31 C0 4C 8B 91 68 01 00 00 48 89 D3", 3, 0 },   // mov rcx, qword ptr [rip + 0x11eb129]; xor r8d, r8d; mov r10, qword ptr [rcx + 0x168]; mov rbx, rdx
+    { "location context", &A_LocContext, RS_REF, 0x14179F0D8, "4C 8B 05 ?? ?? ?? ?? 48 8B B4 24 08 01 00 00 4C 8B 64 24 40", 3, nullptr, 3, 0 },   // mov r8, qword ptr [rip + 0x1132689]; mov rsi, qword ptr [rsp + 0x108]; mov r12, qword ptr [rsp + 0x40]
+};
+static const int REPOP_SIG_COUNT = (int)(sizeof g_repopSigs / sizeof g_repopSigs[0]);
+static const uintptr_t SDK_STEAM_SPAWN_CONTEXT = 0x1417FEE78;   // the mm SDK's Steam address of s_SpawnSystemContext (spawnsystem.cpp)
+
+static bool ResolveRepopSteam() {
+    auto base = (uintptr_t)GetModuleHandleA(nullptr);
+    auto nt = (const IMAGE_NT_HEADERS*)(base + ((const IMAGE_DOS_HEADER*)base)->e_lfanew);
+    uintptr_t end = base + nt->OptionalHeader.SizeOfImage;
+    static uintptr_t found[64];
+    static_assert(sizeof g_repopSigs / sizeof g_repopSigs[0] <= 64, "found[] too small");
+    int ok = 0;
+    for (int i = 0; i < REPOP_SIG_COUNT; i++) {
+        const RepopSig& r = g_repopSigs[i];
+        GameSignature sig = { r.name, r.gogPattern, true, 0, 0, false };
+        bool steam = false;
+        bool hit = ScanPatternText(sig, r.gogPattern);
+        if (!hit && !sig.matches && r.steamPattern) { steam = true; hit = ScanPatternText(sig, r.steamPattern); }
+        int off = steam ? r.steamOff : r.gogOff;
+        if (hit && sig.alreadyHooked && (r.kind != RS_FUNC || off)) hit = false;   // the E9 fallback only means something at a function start
+        uintptr_t v = 0;
+        if (hit) {
+            v = sig.resolved + off;
+            if (r.kind == RS_REF) {
+                __try { v += 4 + r.extra + *(const int32_t*)v; } __except (EXCEPTION_EXECUTE_HANDLER) { hit = false; }
+            }
+            if (v < base || v >= end) hit = false;
+        }
+        found[i] = hit ? v : 0;
+        if (hit) ok++;
+        LogLine("  repop %-66s %s %p in %s (matches %d)%s%s", r.name, hit ? "OK" : "--", (void*)found[i], hit ? SectionNameOf(v) : "-",
+            sig.matches, steam ? " (Steam form)" : "", sig.alreadyHooked ? " (already hooked)" : "");
+        if (r.var == (void*)&A_SpawnHandlerPtr && hit)
+            LogLine("  repop s_SpawnSystemContext %s the mm SDK's Steam address %p", v == SDK_STEAM_SPAWN_CONTEXT ? "matches" : "DIFFERS FROM", (void*)SDK_STEAM_SPAWN_CONTEXT);
+    }
+    if (ok != REPOP_SIG_COUNT) {
+        LogLine("world repopulation: %d of %d game addresses found on this build", ok, REPOP_SIG_COUNT);
+        return false;
+    }
+    for (int i = 0; i < REPOP_SIG_COUNT; i++) *(uintptr_t*)g_repopSigs[i].var = found[i];
+    LogLine("world repopulation: all %d game addresses found on this build", REPOP_SIG_COUNT);
+    return true;
+}
 #endif
 DEFHOOK(void, CPlayer__UpdateController, (void* thiz, float dt)) {
 	CCharacter* ch = *(CCharacter**)((uintptr_t)thiz + 0x20);
@@ -2724,11 +2836,12 @@ void PluginHooks() {
 
     HookMgr::Install(g_sigs[SIG_UPDATECONTROLLER].resolved, CPlayer__UpdateController_hook, CPlayer__UpdateController_orig);
 #if MM_DEV_TOOLS || MM_WORLD_REPOP
-    g_worldRepopOn = HookMgr::IsKnownGogBuild();
-    if (!g_worldRepopOn) LogLine("world repopulation: OFF (not the GOG build its addresses were taken from)");
+    g_worldRepopOn = HookMgr::IsKnownGogBuild() || (SteamFormsUsed() && ResolveRepopSteam());   // Steam: steam_try.txt was needed to get here
+    if (!g_worldRepopOn) LogLine("world repopulation: OFF (%s)", SteamFormsUsed() ? "not every game address was found, see the repop lines above"
+                                                                                  : "not the GOG build its addresses were taken from");
     else {   // camp repopulation: saves keep repopulated camps liberated (GOG addresses)
-        MH_STATUS c = MH_CreateHook((LPVOID)0x1406393B0, (LPVOID)LocSaveStatus_hook, (LPVOID*)&LocSaveStatus_orig);
-        MH_STATUS e = c == MH_OK ? MH_EnableHook((LPVOID)0x1406393B0) : c;
+        MH_STATUS c = MH_CreateHook((LPVOID)A_LocSaveStatus, (LPVOID)LocSaveStatus_hook, (LPVOID*)&LocSaveStatus_orig);
+        MH_STATUS e = c == MH_OK ? MH_EnableHook((LPVOID)A_LocSaveStatus) : c;
         LogLine("camp repopulation: save-status hook %s", MH_StatusToString(e));
         MH_STATUS cl = MH_CreateHook((LPVOID)A_LocLoadStatus, (LPVOID)LocLoadStatus_hook, (LPVOID*)&LocLoadStatus_orig);
         MH_STATUS el = cl == MH_OK ? MH_EnableHook((LPVOID)A_LocLoadStatus) : cl;

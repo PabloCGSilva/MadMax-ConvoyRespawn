@@ -40,8 +40,8 @@ uint32_t WsJenkinsHash(const char* str) {
     return c;
 }
 
-static const uintptr_t A_Locator = 0x1417127E0;              // CLocator*
-static const uintptr_t A_LocatorGetString = 0x1402117A0;     // CLocator::GetLocalizedString(id): "" for an unknown id
+static uintptr_t A_Locator = 0x1417127E0;              // CLocator*
+static uintptr_t A_LocatorGetString = 0x1402117A0;     // CLocator::GetLocalizedString(id): "" for an unknown id
 static GameFont g_noticeFont;
 static ID3D11Device* g_noticeDev = nullptr;                  // the device g_noticeSrv belongs to: a new one means the renderer was rebuilt
 static ID3D11ShaderResourceView* g_noticeSrv = nullptr;
@@ -85,8 +85,8 @@ static bool CampNoticeQueue(const char* title, const char* detail) {
 // +0x10 / +0x18 / +0x1C gui_empty, +0x14 the text id, +0x24 2.0, +0x38 the seconds) and GameGuiMessageQueuePush queues a copy. The
 // text is a string table id, read through CLocator::GetLocalizedStringRaw when the message is drawn: the mod answers its own ids there.
 // The overlay notice stays for a message whose text the game never asks for
-static const uintptr_t A_GuiMessagePush = 0x14026ABE0;       // GameGuiMessageQueuePush(const SGuiNormalMessageData&, bool)
-static const uintptr_t A_LocatorGetStringRaw = 0x1409C1090;  // CLocator::GetLocalizedStringRaw(id): nullptr for an unknown id
+static uintptr_t A_GuiMessagePush = 0x14026ABE0;       // GameGuiMessageQueuePush(const SGuiNormalMessageData&, bool)
+static uintptr_t A_LocatorGetStringRaw = 0x1409C1090;  // CLocator::GetLocalizedStringRaw(id): nullptr for an unknown id
 static const int NATIVE_TYPE = 28;                           // the storm alert's message type
 static const float NATIVE_SECONDS = 5.f;
 static const int NATIVE_CHECK = 8;                           // game seconds: a message whose text was not asked for by then gets the overlay notice

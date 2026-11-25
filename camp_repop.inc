@@ -13,12 +13,12 @@
 // Saves never keep the repopulated state: GameLocationSystemSaveStatus is hooked and writes the liberated flags for every camp that
 // is not IDLE, so a save made mid-fight loads as a liberated camp (and the mod can be removed at any time).
 // GOG addresses (dev build only).
-static const uintptr_t A_LocStartLoad = 0x1406676D0;            // void (SLocationInfo*)
-static const uintptr_t A_LocEnableLoading = 0x14066C5F0;        // GameLocationSystemInfoEnableLoading (clears the stream block)
-static const uintptr_t A_LocDisableLoading = 0x140638990;       // GameLocationSystemInfoDisableLoading (sets the stream block)
-static const uintptr_t A_SpawnPointSpawn = 0x14032C1A0;         // CSpawnPoint::Spawn()
-static const uintptr_t A_SpawnPointEnable = 0x1403128D0;        // virtual CSpawnPoint::Enable(bool)
-static const uintptr_t VT_SPAWNPOINT_GO = 0x1411F06B8;          // ??_7CSpawnPoint@@6BCGameObject@@@ (container vector entries)
+static uintptr_t A_LocStartLoad = 0x1406676D0;            // void (SLocationInfo*)
+static uintptr_t A_LocEnableLoading = 0x14066C5F0;        // GameLocationSystemInfoEnableLoading (clears the stream block)
+static uintptr_t A_LocDisableLoading = 0x140638990;       // GameLocationSystemInfoDisableLoading (sets the stream block)
+static uintptr_t A_SpawnPointSpawn = 0x14032C1A0;         // CSpawnPoint::Spawn()
+static uintptr_t A_SpawnPointEnable = 0x1403128D0;        // virtual CSpawnPoint::Enable(bool)
+static uintptr_t VT_SPAWNPOINT_GO = 0x1411F06B8;          // ??_7CSpawnPoint@@6BCGameObject@@@ (container vector entries)
 typedef void (*LocFn)(void*);
 typedef void (*SpawnPtEnableFn)(void*, bool);
 
@@ -95,7 +95,7 @@ static const unsigned g_triggerPoints[] = { 0x3B9F5107 };
 static const unsigned g_aiProbePoints[] = { 0x3B9F5107, 0x688D7B6A };
 
 // every objective of the camp done (panel all ticked): a loot crate still on there was left on by an older build of this mod, not by the player
-static const uintptr_t A_LocationInfoTable = 0x14171B000;   // SLocationInfoTable*: +0 entries, +8 count
+static uintptr_t A_LocationInfoTable = 0x14171B000;   // SLocationInfoTable*: +0 entries, +8 count
 static bool CampItemsDone(int i) {
     __try {
         const uint8_t* t = *(const uint8_t* const*)A_LocationInfoTable;
@@ -140,9 +140,9 @@ static const struct { int camp; unsigned spawnPoint, tower; } g_warCriers[] = { 
     { 17, 0x8137E92E, 0xADEDF784 }, { 19, 0x0D88A892, 0x2C2EFC29 }, { 20, 0x9190D231, 0xA49F3DB4 }, { 21, 0x0768641F, 0xFAC3A0D4 },
     { 21, 0x0348A492, 0x7B0F494E }, { 21, 0x5A2F0C58, 0x174CC12E }, { 22, 0x3A523A9D, 0x2439F962 }, { 23, 0x0A89B9BD, 0x309CA2A9 } };
 static bool IsWarCrierSpawnPoint(int camp, unsigned id) { for (auto& w : g_warCriers) if (w.camp == camp && w.spawnPoint == id) return true; return false; }
-static const uintptr_t A_DestructibleLoad = 0x140485100;        // CDestructibleObject::Load(CSaveContext&) (this = CGameObject base)
-static const uintptr_t A_DestructibleDisableParts = 0x140447670;
-static const uintptr_t A_DestructibleEnableParts = 0x140484B00;
+static uintptr_t A_DestructibleLoad = 0x140485100;        // CDestructibleObject::Load(CSaveContext&) (this = CGameObject base)
+static uintptr_t A_DestructibleDisableParts = 0x140447670;
+static uintptr_t A_DestructibleEnableParts = 0x140484B00;
 
 // ---- scavenging locations (2026-10-15) ----------------------------------------------------------------------------------------
 // Their logic part (*_logic, always on) holds the scavengers / gimps / defenders; each spawn point switches itself off when its
@@ -191,7 +191,7 @@ static const float ARENA_FALLBACK = 60.f;
 static struct { int camp; int arena; float left; } g_arenaWait = { -1, -1, 0.f };
 static volatile LONG g_valvesTurned;   // bit k: valveOff[k] seen by EventSend_hook since the valves were made usable
 static volatile LONG g_arenaOwnSend;   // set while the mod sends an arena event itself (EventSend_hook sees those too)
-static const uintptr_t A_SendEventMsg = 0x140007CA0;   // NEvent::CSendEvent<...>::SendMsg(const char*)
+static uintptr_t A_SendEventMsg = 0x140007CA0;   // NEvent::CSendEvent<...>::SendMsg(const char*)
 // r47 (user 2026-11-19: "pode fazer o r47"): a warchief camp's arena gate opens from the base location's 04_camp_completed (CEventTrigger,
 // listens to 87545B6C, sent at the end of the camp completion that the warchief's death starts: user test 2026-10-16 wc1020, the filter
 // dropped it and the gates stayed shut). Its three global events, the camp's own: open the gate, enable 05_open_gates_trigger, destroy
@@ -203,8 +203,8 @@ static const struct { const char* camp; unsigned events[3]; } g_warchiefGates[] 
     { "wc2020", { 0x0466F222, 0x46E3CA32, 0xEB1DF9B1 } },   // The Drop
     { "wc2040", { 0x92DE580A, 0xDBA08BCA, 0xE69EFF1A } },   // Tyrant's Lash
 };
-static const uintptr_t A_EventSystemSendEvent = 0x1409C3150;   // CEventSystem::SendEvent(this, const SEventID*, int, CEventData*)
-static const uintptr_t A_EventSystemInstance = 0x1417116D8;    // CAvaSingle<CEventSystem>::Instance
+static uintptr_t A_EventSystemSendEvent = 0x1409C3150;   // CEventSystem::SendEvent(this, const SEventID*, int, CEventData*)
+static uintptr_t A_EventSystemInstance = 0x1417116D8;    // CAvaSingle<CEventSystem>::Instance
 static bool SendEventIds(const unsigned* hashes, int n, unsigned scope) {
     unsigned ids[2 * 8];
     if (n > 8) n = 8;
@@ -280,7 +280,7 @@ static void RepopTrackLookout(RepopCamp& r, unsigned id) {
 // bodies or lower priority characters for a new spawn (Update 0x140565000, IsSpawnPossible 0x14054EE00). User test 2026-11-06 sd1270: bodies vanished only while spawns
 // were running (8 in 6-24 s), the 12 after the last spawn stayed. +0x1669 follows +0x166B (the default from Init, read only by Update) every frame, and when +0x166B
 // goes back down it only falls as far as the characters in use: nothing is flushed. So +0x166B is raised while a camp is active.
-static const uintptr_t A_SpawnHandlerPtr = 0x14171B678;
+static uintptr_t A_SpawnHandlerPtr = 0x14171B678;
 static const int REPOP_BUDGET_EXTRA = 32;
 static uint8_t g_budgetBase, g_budgetRaised;
 static void RepopBudget(bool raise) {
@@ -301,7 +301,7 @@ static void RepopBudget(bool raise) {
 // How long a body is protected: CSpawnedEntity::AddDeadObject 0x14055FF80 copies CCharacter +0x4FC (6 s, set in the constructor, read nowhere else) into SDeadObject +0x10. While that
 // timer runs, UpdateDeadObject 0x1405088A0 keeps the body even behind the camera or flagged by the budget; only the despawn distance and m_ForceDespawnDeadCharacterCount (a spawn that
 // needs the room) still remove it. Idea from the mod "Bodies stay longer" (600 s, built for another exe), which writes the field per character; here the constructor's constant changes.
-static const uintptr_t A_CharacterBodyTime = 0x140149ECF;       // imm32 of mov dword ptr [rbx + 0x4FC], 6.0f
+static uintptr_t A_CharacterBodyTime = 0x140149ECF;       // imm32 of mov dword ptr [rbx + 0x4FC], 6.0f
 static const float REPOP_BODY_SECONDS = 600.f;
 static bool RepopBodyTimePatch() {
     uint32_t* imm = (uint32_t*)A_CharacterBodyTime;
@@ -316,8 +316,8 @@ static bool RepopBodyTimePatch() {
 // A camp held by the enemy reads as enemy on the map, with no byte of the location table changed (it goes to the save, and +0x43 also feeds the camp scripts and dialogue:
 // scripts/gameobjects/encampment/camp_is_completed). CGameMapIcon::ShowIcon re-reads the main mission for every icon whenever the GUI list is rebuilt, so only that call
 // is answered differently. The camp panel keeps the real data: user 2026-11-06, objectives read as done (10/10) on a retaken camp.
-static const uintptr_t A_LocMainDone = 0x1403DF0D0;             // LocationInfoIsCampMainMissionCompleted: +0x42 (total) && !+0x43 (left)
-static const uintptr_t A_LocMainDoneShowIconRet = 0x14022E25E;
+static uintptr_t A_LocMainDone = 0x1403DF0D0;             // LocationInfoIsCampMainMissionCompleted: +0x42 (total) && !+0x43 (left)
+static uintptr_t A_LocMainDoneShowIconRet = 0x14022E25E;
 typedef bool (*LocMainDoneFn)(const uint8_t*);
 static LocMainDoneFn LocMainDone_orig = nullptr;
 static bool CampHeldByEnemy(const uint8_t* entry) {
@@ -334,8 +334,8 @@ static bool LocMainDone_hook(const uint8_t* entry) {
 // The status screen (gui/hud_status_cam, setup_location_info) takes the title and the main objective's tick from the same test, left of pair 7 == 0: true shows "Ally Camp" and the tick, false the camp type
 // and no tick. No value there gives the enemy title with 10/10, so the data stays real and only the text changes: "Ally Camp" is used by this screen alone (no other GUI file, not in the exe), and the
 // location on show is the one the GUI last asked the tracked items of. Text ids from location_info_helpers.get_location_type_string_from_type, in every language of the game.
-static const uintptr_t A_LocTrackedItems = 0x1403E0A30;   // LocationInfoGetTrackedItemInfo: 11 pairs of bytes at entry +0x34, called by CGameGuiCallbacks::HandleGameEvents only
-static const uintptr_t A_GuiLocalizedText = 0x1409192D0;  // CTextUtil::GetLocalizedText: called by GameGuiRenderText and FontNodeResizeHandler, text id at SGUIXFontData +4
+static uintptr_t A_LocTrackedItems = 0x1403E0A30;   // LocationInfoGetTrackedItemInfo: 11 pairs of bytes at entry +0x34, called by CGameGuiCallbacks::HandleGameEvents only
+static uintptr_t A_GuiLocalizedText = 0x1409192D0;  // CTextUtil::GetLocalizedText: called by GameGuiRenderText and FontNodeResizeHandler, text id at SGUIXFontData +4
 static const unsigned TEXT_ALLY_CAMP = 0x52760149;
 typedef void (*LocTrackedItemsFn)(unsigned short, const uint8_t**, unsigned long long*);
 typedef void (*GuiLocalizedTextFn)(uint8_t*, void*, bool*);
@@ -372,7 +372,7 @@ static void GuiLocalizedText_hook(uint8_t* font, void* out, bool* system) {
 //   868D48E1 top_dog.camp_complete (every Top Dog camp), 400BC781 evt.objective.state_memory / smsf.objective.on (every one),
 //   evt.top_dog_dead: B2F680F5 wc1020, 4B8A1508 wc1050, CD9CA9DC wc2020, 870DD82C wc2040.
 // NEvent::CEventImpl::Send (0x1409C25D0): the event's sort id dwords at +8 / +0xC hold the event hash (ThunderdomeProbe).
-static const uintptr_t A_EventSend = 0x1409C25D0;
+static uintptr_t A_EventSend = 0x1409C25D0;
 typedef void (*EventSendFn)(void*, void*);
 static EventSendFn EventSend_orig = nullptr;
 // r47: the four evt.top_dog_dead events go through: in every warchief camp their only listeners are evt.top_dog_dead triggers that make
@@ -523,9 +523,9 @@ static uint8_t* FindInLocations(uint8_t* const* l, int n, unsigned id) {
     }
     return nullptr;
 }
-static const uintptr_t A_TerrainHeight = 0x14078BCF0;         // CTerrainMapBase::GetBilinearHeight(const CVector3f&)
-static const uintptr_t A_GroundBelow = 0x14057FD40;           // CAirVehicle::GetGroundHeight_Expensive: a static-only ray from y + 1 down to the terrain
-static const uintptr_t A_TerrainInstance = 0x141711D10;       // CAvaSingle<CTerrainMapBase>::Instance
+static uintptr_t A_TerrainHeight = 0x14078BCF0;         // CTerrainMapBase::GetBilinearHeight(const CVector3f&)
+static uintptr_t A_GroundBelow = 0x14057FD40;           // CAirVehicle::GetGroundHeight_Expensive: a static-only ray from y + 1 down to the terrain
+static uintptr_t A_TerrainInstance = 0x141711D10;       // CAvaSingle<CTerrainMapBase>::Instance
 static const int LOOKOUT_N = sizeof g_lookoutPlatforms / sizeof g_lookoutPlatforms[0];
 static uint8_t* g_lookoutPlatGo[LOOKOUT_N];                   // where each platform was last found loaded (checked by its id before use)
 static float g_lookoutLowY[LOOKOUT_N];                        // the height each point was moved to (0: not moved)
@@ -604,7 +604,7 @@ static const char* CampTitle(int i) {
 // 673228D7) 1.8 s later. Every camp has one (tools/aibt/camp_completion_table.py). While a camp is held its completion graph's events
 // are dropped: the mod's own count retakes the camp (CampRetaken)
 #include "camp_completion_table.inc"
-static const uintptr_t A_GraphScriptHandleEvent = 0x1402B2DA0;   // CGraphScriptGameObject::HandleEvent (this = object + 0xD0)
+static uintptr_t A_GraphScriptHandleEvent = 0x1402B2DA0;   // CGraphScriptGameObject::HandleEvent (this = object + 0xD0)
 static volatile LONG g_completionLines;
 DEFHOOK(void, GraphScriptHandleEvent, (uint8_t* self, const uint8_t* impl, const void* data)) {
     if (g_repopInit) {
@@ -686,8 +686,8 @@ static void RepopCiviliansBack(int i) {
 // (up to 1100 m) never happened in a normal session. Numpad 7 skips every cooldown; the overlay shows the nearest tower.
 #include "sniper_table.inc"
 static const int SN_N = sizeof g_snipers / sizeof g_snipers[0];
-static const uintptr_t A_TargetEnable = 0x140317670;            // CTargetGameObject::EnableTarget()
-static const uintptr_t A_TargetSave = 0x140317470;              // CTargetGameObject::Save(CSaveContext&) (CHarpoonTarget has none of its own)
+static uintptr_t A_TargetEnable = 0x140317670;            // CTargetGameObject::EnableTarget()
+static uintptr_t A_TargetSave = 0x140317470;              // CTargetGameObject::Save(CSaveContext&) (CHarpoonTarget has none of its own)
 struct SniperState { float cd; bool armed, towerRestored, notCleared; float loadedFor; float watch; bool back, backOnTower; int lastStatus; };
 static const float SNIPER_FAR = 600.f;
 static SniperState g_sn[SN_N];
@@ -734,7 +734,7 @@ static uint8_t* ChildById(uint8_t* go, unsigned id) {
 // puts it back in the update list (a disabled spawn point leaves it), so it spawns its sniper by itself whenever the player is within
 // its spawn distance and the spawn system has none of it -- also after a despawn by distance -- until the death event disables it.
 // Spawn() right after gives the first one at once. SpawnSystemGetStatus(m_SpawnInstanceInfo.m_SpawnId) is logged as proof.
-static const uintptr_t A_SpawnSystemGetStatus = 0x140530420;   // unsigned SpawnSystemGetStatus(const CHashString&)
+static uintptr_t A_SpawnSystemGetStatus = 0x140530420;   // unsigned SpawnSystemGetStatus(const CHashString&)
 static bool SafeEnableSpawnPoint(uint8_t* go) {
     __try { ((SpawnPtEnableFn)A_SpawnPointEnable)(go, true); ((LocFn)A_SpawnPointSpawn)(go - 0x10); return go[0x222] != 0; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
@@ -756,7 +756,7 @@ static bool SpawnEntityChars(const uint8_t* sp, int* live, int* dead) {
 }
 // 2B89002B of sd2060 spawns with god mode on (CCharacter +0xE9; who sets it is not known): CDamageable::SetHealth stops its health at 0.1, it lies on the ground for good, the combat music plays on and it
 // never reaches the dead list (r15 test: 80 -> 0.100, god 1, three characters in a row). Switched off on every live character of the point, the CCharacter being 8 bytes before the object. Returns the last one cleared
-static const uintptr_t VT_CHARACTER_GO = 0x1411BDBD8;      // CCharacter's CGameObject vftable
+static uintptr_t VT_CHARACTER_GO = 0x1411BDBD8;      // CCharacter's CGameObject vftable
 static uint8_t* SpawnEntityClearGod(const uint8_t* sp) {
     uint8_t* cleared = nullptr;
     __try {
@@ -895,9 +895,9 @@ static void SniperTick(float step) {
 // The map stays cleared.
 #include "minefield_table.inc"
 static const int MF_N = sizeof g_minefields / sizeof g_minefields[0];
-static const uintptr_t A_RouterLoad = 0x1403E18F0;              // CEventRouter::Load(const CSaveContext&): one saved bit -> go+0xE8
-static const uintptr_t A_CountTriggerLoad = 0x1405704F0;        // CCountTrigger::Load: count +0xE8, bit 0x02 of +0x160
-static const uintptr_t A_LootBagLoad = 0x140310E70;             // CLootBag::Load: +0x170
+static uintptr_t A_RouterLoad = 0x1403E18F0;              // CEventRouter::Load(const CSaveContext&): one saved bit -> go+0xE8
+static uintptr_t A_CountTriggerLoad = 0x1405704F0;        // CCountTrigger::Load: count +0xE8, bit 0x02 of +0x160
+static uintptr_t A_LootBagLoad = 0x140310E70;             // CLootBag::Load: +0x170
 #define MF_DIAG 0   // 1 = the r30 MINEDIAG lines (router bit changes with their callers, the bits saved on unload and loaded back)
 struct MinefieldState { float cd; bool cleared, armed, seen; int reset; float loadedFor; };
 static MinefieldState g_mf[MF_N];
@@ -1117,7 +1117,7 @@ static bool EnemyVitalsRead(const uint8_t* sp, EnemyVitals* v) {
     return false;
 }
 typedef bool (*AiGoToHandleFn)(void* go, unsigned* handle);
-static const AiGoToHandleFn AiGameObjectToEntityHandle = (AiGoToHandleFn)0x140038E30;
+static AiGoToHandleFn AiGameObjectToEntityHandle = (AiGoToHandleFn)0x140038E30;
 
 // ---- perch gimps (r25, user tests 2026-11-10) ---------------------------------------------------------------------------------------
 // The gimp of 3B9F5107 (sd2090) waits on a perch whose navmesh has no link to the ground. With the player in its area of operations its behaviour tree asks
@@ -1134,7 +1134,7 @@ typedef uint8_t* (*FindIncomingMessageFn)(void* box, unsigned entity, unsigned t
 static FindIncomingMessageFn FindIncomingMessage;
 static const unsigned NAT_MOVE_TO_POINT = 0x8CDA7383;
 typedef void (*CharSetTransformFn)(void* go, const float* m);
-static const CharSetTransformFn CharSetTransform = (CharSetTransformFn)0x1400CD5F0;   // CCharacter::SetTransform(const CMatrix4f&), this = the CGameObject (matrix at +0x1D0)
+static CharSetTransformFn CharSetTransform = (CharSetTransformFn)0x1400CD5F0;   // CCharacter::SetTransform(const CMatrix4f&), this = the CGameObject (matrix at +0x1D0)
 static const float PERCH_UNREACHABLE_FOR = 2.5f;   // s of "unreachable" replies, a gap over 1 s starting again (in the r25 test the tree stopped asking for 28 s)
 struct AiUnreach { volatile unsigned entity; volatile ULONGLONG since, last; float tx, ty, tz, x, y, z; };   // t* the target started, x y z the one found unreachable
 static AiUnreach g_aiUnreach[8];
@@ -2339,7 +2339,7 @@ DEFHOOK(void, LocSaveStatus, (void* save)) {
 // those the loaded save has liberated: one it has in enemy hands is the game's camp again. GameLocationSystemLoadStatus (called only by
 // CGameWorld::LoadWorldProgress) sets the locations' flags from the save and starts the listed ones loading; it leaves the civilians'
 // stream block (+0x66, DisableLoading) alone
-static const uintptr_t A_LocLoadStatus = 0x140667E70;
+static uintptr_t A_LocLoadStatus = 0x140667E70;
 DEFHOOK(void, LocLoadStatus, (const void* save)) {
     InterlockedExchange(&g_repopSaving, 1);              // RepopTick waits: until the camps are held again the flags are the save's
     LocLoadStatus_orig(save);

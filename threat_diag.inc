@@ -61,11 +61,11 @@ static TdFn4 g_tdOrig[TD_N];
 // that graph only: the HUD, map, strongholds and threat_transfer (which ends the region on threat 0) keep reading the real value.
 // scripts\encounter_min_threat.txt holds the minimum (0 = game behaviour, 1 = as on a new game; default 1).
 static const unsigned GRAPH_ENCOUNTER_SYSTEM = 0x99BD2CEA;      // jenkins("graphs/open_world/encounter_system.gsrc")
-static const uintptr_t A_GsGetFirstVariableData = 0x140F77060; // NGraphScript::CProcessor::GetFirstVariableData(const SGSNode*, unsigned) const
-static const uintptr_t A_GsGetGraph = 0x140F761E0;             // NGraphScript::CProcessor::GetGraph() const
-static const uintptr_t A_GsIsTypeFloat = 0x140F72270;          // NGraphScript::CGraph::IsTypeMatch<float>(const SGSData*)
-static const uintptr_t A_GsGetDataWritable = 0x140F72140;      // NGraphScript::CGraph::GetInternalDataWritable(const SGSData*)
-static const uintptr_t A_GsConvertSetFloat = 0x140F72A30;      // NGraphScript::CGraph::ConvertSet<float>(const SGSData*, const float&)
+static uintptr_t A_GsGetFirstVariableData = 0x140F77060; // NGraphScript::CProcessor::GetFirstVariableData(const SGSNode*, unsigned) const
+static uintptr_t A_GsGetGraph = 0x140F761E0;             // NGraphScript::CProcessor::GetGraph() const
+static uintptr_t A_GsIsTypeFloat = 0x140F72270;          // NGraphScript::CGraph::IsTypeMatch<float>(const SGSData*)
+static uintptr_t A_GsGetDataWritable = 0x140F72140;      // NGraphScript::CGraph::GetInternalDataWritable(const SGSData*)
+static uintptr_t A_GsConvertSetFloat = 0x140F72A30;      // NGraphScript::CGraph::ConvertSet<float>(const SGSData*, const float&)
 static float g_encMinThreat = 1.0f;
 static void EncRaiseThreat(void* proc, void* node) {
     __try {
@@ -113,14 +113,21 @@ static float TdRatio(const float* pos) {
     return r;
 }
 
+static uintptr_t A_TdGso = 0x1402D52D0;
+static uintptr_t A_TdXvmRegion = 0x1404B92C0;
+static uintptr_t A_TdXvmTerritory = 0x1404CBAC0;
+static uintptr_t A_TdRatio = 0x14002D480;
+static uintptr_t A_TdLevelSummary = 0x1404ADFF0;
+static uintptr_t A_TdSummary = 0x140491800;
+
 static void ThreatDiagInstall() {
     struct { uintptr_t addr; void* hook; void** orig; } hooks[] = {
-        { 0x1402D52D0, (void*)TdGso, (void**)&g_tdOrig[TD_GSO] },
-        { 0x1404B92C0, (void*)TdXvmRegion, (void**)&g_tdOrig[TD_XVM_REGION] },
-        { 0x1404CBAC0, (void*)TdXvmTerritory, (void**)&g_tdOrig[TD_XVM_TERRITORY] },
-        { 0x14002D480, (void*)TdRatio, (void**)&g_tdRatioOrig },
-        { 0x1404ADFF0, (void*)TdLevelSummary, (void**)&g_tdOrig[TD_LEVEL_SUMMARY] },
-        { 0x140491800, (void*)TdSummary, (void**)&g_tdOrig[TD_SUMMARY] },
+        { A_TdGso, (void*)TdGso, (void**)&g_tdOrig[TD_GSO] },
+        { A_TdXvmRegion, (void*)TdXvmRegion, (void**)&g_tdOrig[TD_XVM_REGION] },
+        { A_TdXvmTerritory, (void*)TdXvmTerritory, (void**)&g_tdOrig[TD_XVM_TERRITORY] },
+        { A_TdRatio, (void*)TdRatio, (void**)&g_tdRatioOrig },
+        { A_TdLevelSummary, (void*)TdLevelSummary, (void**)&g_tdOrig[TD_LEVEL_SUMMARY] },
+        { A_TdSummary, (void*)TdSummary, (void**)&g_tdOrig[TD_SUMMARY] },
     };
     int ok = 0;
     for (auto& h : hooks) {
