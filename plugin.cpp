@@ -51,7 +51,7 @@
 // User-requested (2026-09-18): always show a visible tag for whatever
 // build is currently installed, so it's never ambiguous which test is
 // running. Bump this string every time a new test build goes out.
-#define MM_BUILD_TAG "v0.9.4-beta1-steamtest6 (2026-11-24)" MM_AUTOTEST_TAG
+#define MM_BUILD_TAG "v0.9.4-beta1-steamtest8 (2026-11-26)" MM_AUTOTEST_TAG
 
 // ---- Session event log (2026-09-21) ----
 // Replaces screenshot-driven debugging: every notable event (wreck seen,
@@ -2513,6 +2513,239 @@ static const RepopSig g_repopSigs[] = {
 static const int REPOP_SIG_COUNT = (int)(sizeof g_repopSigs / sizeof g_repopSigs[0]);
 static const uintptr_t SDK_STEAM_SPAWN_CONTEXT = 0x1417FEE78;   // the mm SDK's Steam address of s_SpawnSystemContext (spawnsystem.cpp)
 
+
+// Second pass (steamtest7). steamtest6 found 46 of the 53 on Steam; the Steam exe (Oct 2015) is an older build
+// than GOG's (Dec 2015), so some functions are not encoded the way the Steam forms predict. Its code keeps GOG's
+// function order (GOG->Steam delta of the 46: +0x1B6CC90 at 0x140007CA0 growing to +0x2094870 at 0x140F77060),
+// so each missing address lies between its found neighbours, and is found there by an anchor that does not
+// depend on how its own bytes were encoded: an RTTI vtable slot, a call to a found function, a found global it
+// reads, a constant next to its call. analysis/steam/repop_repair_check.py checks every finder on the GOG exe.
+static const uintptr_t GOG_TEXT_END = 0x141195000;
+
+static bool InScanRegion(uintptr_t a) {
+    for (int r = 0; r < g_scanRegions; r++) if (a >= g_scanStart[r] && a < g_scanEnd[r]) return true;
+    return false;
+}
+
+static int ParseRepairPattern(const char* pattern, unsigned char* bytes, bool* wild, int cap) {
+    int len = 0;
+    for (const char* c = pattern; *c && len < cap; ) {
+        while (*c == ' ') c++;
+        if (!*c) break;
+        if (c[0] == '?') { wild[len] = true; bytes[len] = 0; len++; c += 2; continue; }
+        unsigned int v = 0; sscanf_s(c, "%2x", &v); bytes[len] = (unsigned char)v; wild[len] = false; len++; c += 2;
+    }
+    return len;
+}
+
+// Matches of a pattern in [lo, hi): the count; the first `max` are kept.
+static int FindInRange(uintptr_t lo, uintptr_t hi, const char* pattern, uintptr_t* out, int max) {
+    unsigned char bytes[64]; bool wild[64];
+    int len = ParseRepairPattern(pattern, bytes, wild, 64), n = 0;
+    if (!len || hi <= lo + len || !RangeReadable(lo, hi - lo)) return 0;
+    __try {
+        for (const unsigned char* p = (const unsigned char*)lo; p + len <= (const unsigned char*)hi; p++) {
+            if (p[0] != bytes[0] && !wild[0]) continue;
+            int i = 1;
+            for (; i < len; i++) if (!wild[i] && p[i] != bytes[i]) break;
+            if (i == len) { if (n < max) out[n] = (uintptr_t)p; n++; }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return n;
+}
+
+static int FindInScanRegions(const char* pattern, uintptr_t* out, int max) {
+    int n = 0;
+    for (int r = 0; r < g_scanRegions; r++) {
+        uintptr_t tmp[16];
+        int k = FindInRange(g_scanStart[r], g_scanEnd[r], pattern, tmp, 16);
+        for (int j = 0; j < k && j < 16; j++) if (n + j < max) out[n + j] = tmp[j];
+        n += k;
+    }
+    return n;
+}
+
+// E8 rel32 calls to target in the code regions.
+static int FindCallsTo(uintptr_t target, uintptr_t* out, int max) {
+    int n = 0;
+    for (int r = 0; r < g_scanRegions; r++) {
+        __try {
+            for (const unsigned char* p = (const unsigned char*)g_scanStart[r]; p + 5 <= (const unsigned char*)g_scanEnd[r]; p++)
+                if (p[0] == 0xE8 && (uintptr_t)p + 5 + *(const int32_t*)(p + 1) == target) { if (n < max) out[n] = (uintptr_t)p; n++; }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    return n;
+}
+
+// Raw bytes in the exe's other (data) sections, at `align`-aligned positions.
+static int FindInData(const void* needle, size_t len, size_t align, uintptr_t* out, int max) {
+    auto base = (uintptr_t)GetModuleHandleA(nullptr);
+    auto nt = (const IMAGE_NT_HEADERS64*)(base + ((const IMAGE_DOS_HEADER*)base)->e_lfanew);
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    int n = 0;
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+        uintptr_t lo = base + sec[i].VirtualAddress, hi = lo + sec[i].Misc.VirtualSize;
+        if (InScanRegion(lo) || hi - lo < len || !RangeReadable(lo, hi - lo)) continue;
+        __try {
+            for (uintptr_t p = lo; p + len <= hi; p += align)
+                if (memcmp((const void*)p, needle, len) == 0) { if (n < max) out[n] = p; n++; }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    return n;
+}
+
+static bool ReadU32(uintptr_t p, uint32_t& v) { __try { v = *(const uint32_t*)p; return true; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; } }
+static bool ReadU64(uintptr_t p, uint64_t& v) { __try { v = *(const uint64_t*)p; return true; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; } }
+static bool ReadBytes(uintptr_t p, void* dst, size_t n) { __try { memcpy(dst, (const void*)p, n); return true; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; } }
+
+// The vtable of an RTTI class (".?AVCCountTrigger@@"): type descriptor (name at +16) <- complete object locator
+// {signature 1, offset 0, cdOffset, type descriptor RVA, hierarchy RVA, own RVA} <- the qword before the vtable.
+static uintptr_t VtableOf(const char* rttiName) {
+    auto base = (uintptr_t)GetModuleHandleA(nullptr);
+    uintptr_t names[2];
+    if (FindInData(rttiName, strlen(rttiName) + 1, 8, names, 2) != 1) return 0;
+    uint32_t td = (uint32_t)(names[0] - 16 - base);
+    uintptr_t refs[64];
+    int nr = FindInData(&td, 4, 4, refs, 64), nvt = 0;
+    uintptr_t vt = 0;
+    for (int k = 0; k < nr && k < 64; k++) {
+        uintptr_t col = refs[k] - 12;
+        uint32_t sig = 0, off = 0, self = 0;
+        if (!ReadU32(col, sig) || !ReadU32(col + 4, off) || !ReadU32(col + 20, self)) continue;
+        if (sig != 1 || off != 0 || self != (uint32_t)(col - base)) continue;
+        uint64_t colVa = col;
+        uintptr_t slots[4];
+        int ns = FindInData(&colVa, 8, 8, slots, 4);
+        for (int j = 0; j < ns && j < 4; j++) { vt = slots[j] + 8; nvt++; }
+    }
+    return nvt == 1 ? vt : 0;
+}
+
+static uintptr_t VtableSlot(const char* rttiName, int slot) {
+    uintptr_t vt = VtableOf(rttiName);
+    uint64_t v = 0;
+    return vt && ReadU64(vt + 8 * slot, v) ? (uintptr_t)v : 0;
+}
+
+static uintptr_t RipTarget(uintptr_t insn, int dispAt, int insnLen) {
+    uint32_t d = 0;
+    return ReadU32(insn + dispAt, d) ? insn + insnLen + (int32_t)d : 0;
+}
+
+static const char* HexAt(uintptr_t p, int n) {
+    static char text[3 * 96 + 1];
+    unsigned char b[96];
+    if (n > 96) n = 96;
+    if (!ReadBytes(p, b, n)) return "(unreadable)";
+    for (int i = 0; i < n; i++) snprintf(text + 3 * i, 4, "%02X ", b[i]);
+    text[n ? 3 * n - 1 : 0] = 0;
+    return text;
+}
+
+static uintptr_t FoundOf(const uintptr_t* found, const void* var) {
+    for (int j = 0; j < REPOP_SIG_COUNT; j++) if (g_repopSigs[j].var == var) return found[j];
+    return 0;
+}
+
+// The found neighbours (in GOG address order) of entry i, and a straight-line estimate between them.
+static bool RepopBracket(int i, const uintptr_t* found, uintptr_t& lo, uintptr_t& hi, uintptr_t& estimate) {
+    uintptr_t g = g_repopSigs[i].gog, gl = 0, gh = ~(uintptr_t)0;
+    lo = hi = estimate = 0;
+    for (int j = 0; j < REPOP_SIG_COUNT; j++) {
+        uintptr_t gj = g_repopSigs[j].gog;
+        if (j == i || !found[j] || gj >= GOG_TEXT_END || !InScanRegion(found[j])) continue;
+        if (gj < g && gj > gl) { gl = gj; lo = found[j]; }
+        if (gj > g && gj < gh) { gh = gj; hi = found[j]; }
+    }
+    if (!lo || !hi || lo >= hi) return false;
+    estimate = lo + (uintptr_t)((double)(hi - lo) * (double)(g - gl) / (double)(gh - gl));
+    return true;
+}
+
+static uintptr_t RepopRepair(int i, const uintptr_t* found, uintptr_t lo, uintptr_t hi, const char*& how) {
+    const void* var = g_repopSigs[i].var;
+    uintptr_t c[16], got = 0;
+    int n = 0, k;
+    if (var == &A_LocMainDoneShowIconRet) {
+        how = "call to LocationInfoIsCampMainMissionCompleted, then test al,al / je / lea rax,[rip] / mov byte [..], 3Ch";
+        uintptr_t done = FoundOf(found, &A_LocMainDone);
+        int nc = done ? FindCallsTo(done, c, 16) : 0;
+        for (k = 0; k < nc && k < 16; k++) {
+            unsigned char a[32];
+            if (!ReadBytes(c[k] + 5, a, sizeof a) || a[0] != 0x84 || a[1] != 0xC0 || a[2] != 0x74) continue;
+            bool lea = false, mov3c = false;
+            for (int j = 0; j + 3 <= 12; j++) if (a[j] == 0x48 && a[j + 1] == 0x8D && a[j + 2] == 0x05) lea = true;
+            for (int j = 0; j + 8 <= 24; j++) if (a[j] == 0xC6 && a[j + 1] == 0x84 && a[j + 7] == 0x3C) mov3c = true;
+            if (lea && mov3c) { got = c[k] + 5; n++; }
+        }
+    } else if (var == &A_TargetSave) {
+        how = "RTTI vtable CTargetGameObject slot 41 (= CHarpoonTarget slot 41)";
+        got = VtableSlot(".?AVCTargetGameObject@@", 41);
+        n = got && got == VtableSlot(".?AVCHarpoonTarget@@", 41) ? 1 : 0;
+    } else if (var == &A_CountTriggerLoad) {
+        how = "RTTI vtable CCountTrigger slot 42 (CLootBag and CEventRouter slot 42 = their found Load)";
+        got = VtableSlot(".?AVCCountTrigger@@", 42);
+        n = got && VtableSlot(".?AVCLootBag@@", 42) == FoundOf(found, &A_LootBagLoad)
+                && VtableSlot(".?AVCEventRouter@@", 42) == FoundOf(found, &A_RouterLoad) ? 1 : 0;
+    } else if (var == &A_LocTrackedItems) {
+        how = "movzx eax,cx at a function start, mov rax,[SLocationInfoTable], then mov qword [r8], 0Bh / ret";
+        uintptr_t table = FoundOf(found, &A_LocationInfoTable);
+        int nc = table ? FindInRange(lo, hi, "0F B7 C1", c, 16) : 0;
+        for (k = 0; k < nc && k < 16; k++) {
+            unsigned char a[49];
+            if (!ReadBytes(c[k] - 1, a, sizeof a) || (a[0] != 0xCC && a[0] != 0xC3)) continue;
+            const unsigned char* f = a + 1;
+            for (int j = 3; j <= 9; j++) {
+                if (f[j] != 0x48 || f[j + 1] != 0x8B || f[j + 2] != 0x05 || RipTarget(c[k] + j, 3, 7) != table) continue;
+                static const unsigned char tail[] = { 0xC7, 0x00, 0x0B, 0x00, 0x00, 0x00, 0xC3 };
+                for (int t = j; t + (int)sizeof tail <= 48; t++) if (memcmp(f + t, tail, sizeof tail) == 0) { got = c[k]; n++; break; }
+                break;
+            }
+        }
+    } else if (var == &A_LocStartLoad) {
+        how = "its signature, between its found neighbours";
+        n = FindInRange(lo, hi, g_repopSigs[i].steamPattern, c, 16);
+        if (!n) n = FindInRange(lo, hi, g_repopSigs[i].gogPattern, c, 16);
+        if (n == 1) got = c[0];
+    } else if (var == &A_GsConvertSetFloat) {
+        how = "sub rsp,28h / mov eax,[rdx+4], then cmp eax,[float type id] as read by IsTypeMatch<float>";
+        uintptr_t istm = FoundOf(found, &A_GsIsTypeFloat), gl = 0;
+        unsigned char b[2];
+        if (istm && ReadBytes(istm, b, 2) && b[0] == 0x8B && (b[1] & 0xC7) == 0x05) gl = RipTarget(istm, 2, 6);
+        int nc = gl ? FindInRange(lo, hi, "48 83 EC 28 8B 42 04", c, 16) : 0;
+        for (k = 0; k < nc && k < 16; k++)
+            for (int j = 7; j <= 13; j++) {
+                unsigned char op[2];
+                if (ReadBytes(c[k] + j, op, 2) && op[0] == 0x3B && op[1] == 0x05 && RipTarget(c[k] + j, 2, 6) == gl) { got = c[k]; n++; break; }
+            }
+    } else if (var == &A_GsGetGraph) {
+        how = "the call right before mov r8d, 75DD9B5Ch, landing on mov rax,[rcx+10h] / ret";
+        int nc = FindInScanRegions("41 B8 5C 9B DD 75", c, 16);
+        for (k = 0; k < nc && k < 16; k++)
+            for (int back = 5; back <= 11; back++) {
+                unsigned char op = 0;
+                if (!ReadBytes(c[k] - back, &op, 1) || op != 0xE8) continue;
+                uintptr_t t = RipTarget(c[k] - back, 1, 5);
+                unsigned char body[5], want[5] = { 0x48, 0x8B, 0x41, 0x10, 0xC3 };
+                if (t && ReadBytes(t, body, 5) && memcmp(body, want, 5) == 0 && t != got) { got = t; n++; }
+                break;
+            }
+        if (!n) {   // Steam (dump 2026-11-26): no such call; the getter is one body shared by every identical getter
+            how = "the one mov rax,[rcx+10h] / ret between its found neighbours";
+            n = FindInRange(lo, hi, "48 8B 41 10 C3", c, 16);
+            if (n == 1) got = c[0];
+        }
+    } else {
+        how = "no second-pass finder";
+        return 0;
+    }
+    if (n != 1 || got < lo || got >= hi) {
+        if (n > 1) how = "more than one candidate";
+        return 0;
+    }
+    return got;
+}
+
 static bool ResolveRepopSteam() {
     auto base = (uintptr_t)GetModuleHandleA(nullptr);
     auto nt = (const IMAGE_NT_HEADERS*)(base + ((const IMAGE_DOS_HEADER*)base)->e_lfanew);
@@ -2543,12 +2776,32 @@ static bool ResolveRepopSteam() {
         if (r.var == (void*)&A_SpawnHandlerPtr && hit)
             LogLine("  repop s_SpawnSystemContext %s the mm SDK's Steam address %p", v == SDK_STEAM_SPAWN_CONTEXT ? "matches" : "DIFFERS FROM", (void*)SDK_STEAM_SPAWN_CONTEXT);
     }
-    if (ok != REPOP_SIG_COUNT) {
+    for (int i = 0; i < REPOP_SIG_COUNT && ok < REPOP_SIG_COUNT; i++) {   // second pass, see RepopRepair
+        if (found[i]) continue;
+        const RepopSig& r = g_repopSigs[i];
+        uintptr_t lo, hi, estimate;
+        if (!RepopBracket(i, found, lo, hi, estimate)) { LogLine("  repop %-66s -- second pass: no found neighbours", r.name); continue; }
+        const char* how = "";
+        uintptr_t v = RepopRepair(i, found, lo, hi, how);
+        if (v) {
+            found[i] = v; ok++;
+            LogLine("  repop %-66s OK %p in %s (second pass: %s; between %p and %p) bytes %s", r.name, (void*)v, SectionNameOf(v), how, (void*)lo, (void*)hi, HexAt(v, 24));
+        } else {
+            LogLine("  repop %-66s -- second pass failed (%s); between %p and %p, estimate %p", r.name, how, (void*)lo, (void*)hi, (void*)estimate);
+            for (int d = -64; d < 128; d += 32) LogLine("      %p: %s", (void*)(estimate + d), HexAt(estimate + d, 32));
+        }
+    }
+    int optionalMissing = 0;
+    for (int i = 0; i < REPOP_SIG_COUNT; i++)
+        if (!found[i] && g_repopSigs[i].var == (void*)&A_LocTrackedItems) optionalMissing++;
+    if (ok + optionalMissing != REPOP_SIG_COUNT) {
         LogLine("world repopulation: %d of %d game addresses found on this build", ok, REPOP_SIG_COUNT);
         return false;
     }
     for (int i = 0; i < REPOP_SIG_COUNT; i++) *(uintptr_t*)g_repopSigs[i].var = found[i];
-    LogLine("world repopulation: all %d game addresses found on this build", REPOP_SIG_COUNT);
+    if (optionalMissing) LogLine("world repopulation: %d of %d game addresses found on this build; LocationInfoGetTrackedItemInfo is optional "
+                                 "(the status screen keeps its \"Ally Camp\" title on a camp the enemy took back)", ok, REPOP_SIG_COUNT);
+    else LogLine("world repopulation: all %d game addresses found on this build", REPOP_SIG_COUNT);
     return true;
 }
 #endif
@@ -2888,11 +3141,13 @@ void PluginHooks() {
         MH_STATUS c4 = MH_CreateHook((LPVOID)A_LocMainDone, (LPVOID)LocMainDone_hook, (LPVOID*)&LocMainDone_orig);
         MH_STATUS e4 = c4 == MH_OK ? MH_EnableHook((LPVOID)A_LocMainDone) : c4;
         LogLine("camp repopulation: map icon hook %s", MH_StatusToString(e4));
-        MH_STATUS c5 = MH_CreateHook((LPVOID)A_LocTrackedItems, (LPVOID)LocTrackedItems_hook, (LPVOID*)&LocTrackedItems_orig);
-        MH_STATUS e5 = c5 == MH_OK ? MH_EnableHook((LPVOID)A_LocTrackedItems) : c5;
-        MH_STATUS c6 = MH_CreateHook((LPVOID)A_GuiLocalizedText, (LPVOID)GuiLocalizedText_hook, (LPVOID*)&GuiLocalizedText_orig);
-        MH_STATUS e6 = c6 == MH_OK ? MH_EnableHook((LPVOID)A_GuiLocalizedText) : c6;
-        LogLine("camp repopulation: banner hooks %s, %s", MH_StatusToString(e5), MH_StatusToString(e6));
+        if (A_LocTrackedItems) {   // 0 on Steam: not in that build (see ResolveRepopSteam)
+            MH_STATUS c5 = MH_CreateHook((LPVOID)A_LocTrackedItems, (LPVOID)LocTrackedItems_hook, (LPVOID*)&LocTrackedItems_orig);
+            MH_STATUS e5 = c5 == MH_OK ? MH_EnableHook((LPVOID)A_LocTrackedItems) : c5;
+            MH_STATUS c6 = MH_CreateHook((LPVOID)A_GuiLocalizedText, (LPVOID)GuiLocalizedText_hook, (LPVOID*)&GuiLocalizedText_orig);
+            MH_STATUS e6 = c6 == MH_OK ? MH_EnableHook((LPVOID)A_GuiLocalizedText) : c6;
+            LogLine("camp repopulation: banner hooks %s, %s", MH_StatusToString(e5), MH_StatusToString(e6));
+        } else LogLine("camp repopulation: banner hooks skipped (no LocationInfoGetTrackedItemInfo on this build)");
         MH_STATUS c7 = MH_CreateHook((LPVOID)A_LocatorGetStringRaw, (LPVOID)LocatorGetStringRaw_hook, (LPVOID*)&LocatorGetStringRaw_orig);
         MH_STATUS e7 = c7 == MH_OK ? MH_EnableHook((LPVOID)A_LocatorGetStringRaw) : c7;
         g_nativeOn = e7 == MH_OK;
