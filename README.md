@@ -4,19 +4,19 @@ Makes destroyed convoys in Mad Max (2015, PC) come back — in the same play
 session, driven by the game's own logic, without touching the wreck, the
 hood ornament or the region Threat.
 
-**Status: public beta (v0.9.4-beta1, Enhanced Convoys + World Repop).** Made and tested on the GOG build of
-`AVAMain.exe` (2015-12-07). The game functions are found by byte signature,
-and since beta3 the mod waits for Steam's DRM to decrypt the executable before
-looking, so the Steam version should work too (not confirmed yet). If anything
-can't be found, the mod disables itself and says so.
+**Status: public beta (v0.9.5-beta1, Enhanced Convoys + World Repop).** Made on the GOG build of
+`AVAMain.exe` (2015-12-07) and tested on it and on the Steam build of `MadMax.exe` (2015-10-22). The game
+functions are found by byte signature; the Steam executable runs a re-encoded copy of its code, so every
+signature also has a Steam form. If anything can't be found, the mod disables itself and says so.
 
 ➡ **Players: grab the zip from the [Releases](../../releases) page.** The
 README inside explains installation, how it works and how to
 report problems.
 
-## World Repop (v0.9.4-beta1)
+## World Repop (v0.9.4-beta1, Steam since v0.9.5-beta1)
 
-The same plugin also puts enemies back into a cleared Wasteland (GOG build only; it switches itself off on any other executable):
+The same plugin also puts enemies back into a cleared Wasteland (GOG and Steam builds; on Steam its game addresses are found by
+signature at startup, and it switches itself off if any is missing):
 
 * **Camps** (35: scrap, fuel and food depots, the camps that guard a vehicle and the four Warchief strongholds): every 20 to 40 minutes of game time the enemy takes back
   a liberated camp away from the player (3 at most). A game message names it, its map icon shows as enemy territory, the enemies are back

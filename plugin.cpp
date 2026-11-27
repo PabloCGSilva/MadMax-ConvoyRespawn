@@ -51,7 +51,7 @@
 // User-requested (2026-09-18): always show a visible tag for whatever
 // build is currently installed, so it's never ambiguous which test is
 // running. Bump this string every time a new test build goes out.
-#define MM_BUILD_TAG "v0.9.4-beta1-steamtest9 (2026-11-27)" MM_AUTOTEST_TAG
+#define MM_BUILD_TAG "v0.9.5-beta1 (2026-11-27)" MM_AUTOTEST_TAG
 
 // ---- Session event log (2026-09-21) ----
 // Replaces screenshot-driven debugging: every notable event (wreck seen,
