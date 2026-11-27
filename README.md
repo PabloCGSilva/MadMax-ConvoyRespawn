@@ -78,3 +78,9 @@ in the research project this was built in; ask if you want it.
 * Everything added in `plugin.cpp` for the convoy respawn is released under
   the MIT license (see `LICENSE-plugin.md`).
 * Ultimate ASI Loader by ThirteenAG (MIT) is redistributed in the release zip.
+
+## Thanks
+
+* **NordicTraveller**, who ran the Steam test builds and sent the logs that made Steam support possible.
+* **liber88**, who gifted a Steam copy of the game, so the Steam version could be tested directly.
+* The Mad Max modding community on Nexus Mods and the **Mad Max Speedrunning & Modding** Discord server.
