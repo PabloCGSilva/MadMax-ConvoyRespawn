@@ -51,7 +51,7 @@
 // User-requested (2026-09-18): always show a visible tag for whatever
 // build is currently installed, so it's never ambiguous which test is
 // running. Bump this string every time a new test build goes out.
-#define MM_BUILD_TAG "v0.9.4-beta1-steamtest8 (2026-11-26)" MM_AUTOTEST_TAG
+#define MM_BUILD_TAG "v0.9.4-beta1-steamtest9 (2026-11-27)" MM_AUTOTEST_TAG
 
 // ---- Session event log (2026-09-21) ----
 // Replaces screenshot-driven debugging: every notable event (wreck seen,
@@ -231,8 +231,10 @@ static bool ScanPattern(GameSignature& sig) {
     return g_sigSteamForm[i];
 }
 
-// Opt-in for the Steam test: the mod only runs on signatures found in their
-// Steam form when <game>\scripts\steam_try.txt exists.
+// Signatures found in their Steam form are used as they are on the Steam build
+// they were tested on (Pablo's own copy, 2026-11-26); on any other build only
+// when <game>\scripts\steam_try.txt exists (the opt-in of the Steam test).
+static const unsigned STEAM_EXE_TIMESTAMP = 0x5628A448u;
 static bool SteamTryEnabled() {
     char path[MAX_PATH];
     GetModuleFileNameA(NULL, path, MAX_PATH);
@@ -410,14 +412,14 @@ static bool ResolveGameAddresses() {
         snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "signature not found: %s (exe timestamp 0x%08X, code section %s)", failList, g_exeTimeStamp, g_codeSection);
         return false;
     }
-    if (SteamFormsUsed() && !SteamTryEnabled()) {
-        snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "all required signatures found, %d of them in their Steam form; not enabled: no scripts\\steam_try.txt (exe timestamp 0x%08X)",
+    if (SteamFormsUsed() && g_exeTimeStamp != STEAM_EXE_TIMESTAMP && !SteamTryEnabled()) {
+        snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "all required signatures found, %d of them in their Steam form; not enabled on this unknown build: no scripts\\steam_try.txt (exe timestamp 0x%08X)",
             SteamFormsUsed(), g_exeTimeStamp);
         return false;
     }
     snprintf(g_gameVersionStatus, sizeof(g_gameVersionStatus), "OK, %d/%d signatures resolved (exe timestamp 0x%08X, %s, code section %s)",
         SIG_COUNT - (int)(!g_sigs[SIG_RESOLVECOMPOSITION].matches) - (int)(g_sigs[SIG_TABLEACCESSOR].matches != 1) - (int)(g_sigs[SIG_MANAGERPTR].matches != 1) - (int)(g_sigs[SIG_SPAWNSTORM].matches != 1),
-        SIG_COUNT, g_exeTimeStamp, g_exeTimeStamp == 0x566520B2u ? "the GOG build this was made on" : "a build not seen by the author -- please report", g_codeSection);
+        SIG_COUNT, g_exeTimeStamp, g_exeTimeStamp == 0x566520B2u ? "the GOG build this was made on" : g_exeTimeStamp == STEAM_EXE_TIMESTAMP ? "the Steam build" : "a build not seen by the author -- please report", g_codeSection);
     return true;
 }
 
@@ -3089,7 +3091,7 @@ void PluginHooks() {
 
     HookMgr::Install(g_sigs[SIG_UPDATECONTROLLER].resolved, CPlayer__UpdateController_hook, CPlayer__UpdateController_orig);
 #if MM_DEV_TOOLS || MM_WORLD_REPOP
-    g_worldRepopOn = HookMgr::IsKnownGogBuild() || (SteamFormsUsed() && ResolveRepopSteam());   // Steam: steam_try.txt was needed to get here
+    g_worldRepopOn = HookMgr::IsKnownGogBuild() || (SteamFormsUsed() && ResolveRepopSteam());   // Steam forms are in use: the Steam build, or steam_try.txt
     if (!g_worldRepopOn) LogLine("world repopulation: OFF (%s)", SteamFormsUsed() ? "not every game address was found, see the repop lines above"
                                                                                   : "not the GOG build its addresses were taken from");
     else {   // camp repopulation: saves keep repopulated camps liberated (GOG addresses)
