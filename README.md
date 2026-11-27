@@ -4,7 +4,7 @@ Makes destroyed convoys in Mad Max (2015, PC) come back — in the same play
 session, driven by the game's own logic, without touching the wreck, the
 hood ornament or the region Threat.
 
-**Status: public beta (v0.9.5-beta1, Enhanced Convoys + World Repop).** Made on the GOG build of
+**Status: public beta (v0.9.5-beta2, Enhanced Convoys + World Repop).** Made on the GOG build of
 `AVAMain.exe` (2015-12-07) and tested on it and on the Steam build of `MadMax.exe` (2015-10-22). The game
 functions are found by byte signature; the Steam executable runs a re-encoded copy of its code, so every
 signature also has a Steam form. If anything can't be found, the mod disables itself and says so.
@@ -26,6 +26,11 @@ signature at startup, and it switches itself off if any is missing):
   gate opens. Lookouts of a pulled-down tower come back on the ground. No structure, drummer or item comes back, and saves always store the camp as liberated.
 * **Scavenging locations** (135), **sniper towers** (35, rebuilt) and **minefields** (30, mines buried again) come back on the same timer.
 * **Road encounters** keep their rate when a region's threat is zero.
+
+Every timer counts game time from the first save load of a session: destroyed convoys come back 3 to 8 minutes after their wreck
+flow ends (save-destroyed ones right after loading) once the player is 2 km away, the first camp attack comes after 20 to 40
+minutes, and scavenging locations, sniper towers and minefields each get 30 to 60 minutes. The player-facing table is in the
+release README ("When things come back").
 
 The code is in `camp_repop.inc` (with `camp_notice.inc` and the `*_table.inc` files) and `threat_diag.inc`. `MM_WORLD_REPOP` compiles it
 without the dev tools. Test override: `scripts\repop_test.txt` with `min max` cooldown seconds, then the camp codes to attack first.

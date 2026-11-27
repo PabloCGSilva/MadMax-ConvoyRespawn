@@ -51,7 +51,7 @@
 // User-requested (2026-09-18): always show a visible tag for whatever
 // build is currently installed, so it's never ambiguous which test is
 // running. Bump this string every time a new test build goes out.
-#define MM_BUILD_TAG "v0.9.5-beta1 (2026-11-27)" MM_AUTOTEST_TAG
+#define MM_BUILD_TAG "v0.9.5-beta2 (2026-11-27)" MM_AUTOTEST_TAG
 
 // ---- Session event log (2026-09-21) ----
 // Replaces screenshot-driven debugging: every notable event (wreck seen,
@@ -1991,7 +1991,6 @@ static TrackedConvoy g_tracked[sizeof(g_convoyPairs) / sizeof(g_convoyPairs[0])]
 static float g_sweepAccum = 0.0f;
 static int g_sweepCount = 0;
 static int g_totalAutoRespawns = 0;
-static bool g_respawnRngSeeded = false;
 
 // CGameObject::FindOptional hands back a boost::shared_ptr; ResetAllKnownConvoys
 // above just drops it (one leaked refcount per call, fine for a hotkey). The
@@ -2028,7 +2027,6 @@ static void GameObjectAddToUpdate(void* obj) {
 }
 
 static float RandomDelaySeconds() {
-    if (!g_respawnRngSeeded) { srand((unsigned)GetTickCount()); g_respawnRngSeeded = true; }
     float t = (float)rand() / (float)RAND_MAX;
     return CONVOY_RESPAWN_DELAY_MIN_S + t * (CONVOY_RESPAWN_DELAY_MAX_S - CONVOY_RESPAWN_DELAY_MIN_S);
 }
@@ -2824,6 +2822,11 @@ DEFHOOK(void, CPlayer__UpdateController, (void* thiz, float dt)) {
 		g_lastSignatureVehicle = GetSignatureVehicleNative();
 #endif
 	}
+
+	// Seed rand() once, on this thread (the CRT keeps its state per thread), before any tick draws from it. It used to be seeded
+	// by the first convoy delay, after World Repop had drawn its timers: the first camp attack was always 20.0 min (2026-11-27).
+	static bool rngSeeded = false;
+	if (!rngSeeded) { srand((unsigned)GetTickCount() ^ GetCurrentProcessId()); rngSeeded = true; }
 
 	ConvoyRespawnTick(dt);
 #if MM_DEV_TOOLS && MM_STORM_TOOLS
